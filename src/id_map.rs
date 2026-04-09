@@ -30,6 +30,10 @@ pub fn common_id_to_attr(id: &str) -> Option<&'static str> {
         "0x19"          => Some("daily_max_wind"),
         // Feel-like / apparent temperature (id "3" without 0x prefix in some firmware)
         "3"             => Some("feels_like"),
+        // Vapor pressure deficit (added in firmware v1.0.4)
+        "5"             => Some("vpd"),
+        // Wet-bulb globe temperature (added in firmware v1.0.6)
+        "0x6D"          => Some("wbgt"),
         _               => None,
     }
 }

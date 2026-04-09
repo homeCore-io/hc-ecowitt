@@ -1,4 +1,5 @@
 mod config;
+mod form_parser;
 mod id_map;
 mod logging;
 mod parser;
@@ -97,6 +98,11 @@ async fn try_start(
             Some(log_level_handle),
         )
         .await?;
+
+    // Publish active status.
+    if let Err(e) = client.publish_plugin_status("active").await {
+        error!(error = %e, "Failed to publish plugin status");
+    }
 
     // Start SDK event loop (weather sensors are read-only — no commands).
     tokio::spawn(async move {

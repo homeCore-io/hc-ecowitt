@@ -1,12 +1,15 @@
 //! Axum HTTP server that receives POST data from the Ecowitt gateway.
+//!
+//! The Ecowitt "custom server" feature sends `application/x-www-form-urlencoded`
+//! data.  We accept that format and convert to device updates.
 
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
-use serde_json::Value;
+use axum::{extract::State, http::StatusCode, routing::post, Form, Router};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use crate::parser::parse_livedata;
+use crate::form_parser::parse_form_data;
 use crate::registry::DeviceRegistry;
 
 /// Shared state for the HTTP server and poller.
@@ -25,11 +28,11 @@ pub fn router(state: Arc<SharedState>) -> Router {
 
 async fn handle_report(
     State(state): State<Arc<SharedState>>,
-    Json(body): Json<Value>,
+    Form(fields): Form<HashMap<String, String>>,
 ) -> StatusCode {
-    debug!("Received POST from Ecowitt gateway");
+    debug!(fields = fields.len(), "Received POST from Ecowitt gateway");
 
-    let updates = parse_livedata(&body, &state.device_prefix);
+    let updates = parse_form_data(&fields, &state.device_prefix);
     if updates.is_empty() {
         warn!("POST contained no parseable sensor data");
         return StatusCode::OK;
