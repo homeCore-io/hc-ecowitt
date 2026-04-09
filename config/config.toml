@@ -1,0 +1,38 @@
+# hc-ecowitt — Ecowitt Weather Station plugin for HomeCore
+#
+# Supports two data ingestion modes:
+# 1. HTTP POST receiver: Gateway POSTs data to this plugin (primary)
+# 2. HTTP GET polling: Plugin polls the gateway API (fallback/bootstrap)
+#
+# Devices are dynamically discovered from the data — no manual sensor listing needed.
+# Configure the Ecowitt gateway's "Customized" upload to point to this plugin:
+#   Protocol: Ecowitt
+#   Server IP: <this machine's IP>
+#   Path: /data/report/
+#   Port: 8888
+#   Upload interval: 60 seconds
+
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.ecowitt"
+password    = ""
+
+[ecowitt]
+# Port for the HTTP server receiving POSTs from the Ecowitt gateway
+listen_port = 8888
+
+# Optional: gateway IP for polling mode (GET /get_livedata_info)
+# Uncomment to enable polling as a supplement or alternative to POST mode.
+# gateway_ip = "10.0.10.50"
+# poll_interval_secs = 60
+
+# Prefix for HomeCore device IDs (e.g., "ecowitt_weather", "ecowitt_temp_1")
+# device_prefix = "ecowitt"
+
+# [logging]
+# dir = "logs"
+# max_bytes = 10485760
+# max_files = 5
+# compress = true
+# log_forward_level = "info"
