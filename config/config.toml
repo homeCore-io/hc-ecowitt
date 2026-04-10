@@ -1,4 +1,5 @@
 # hc-ecowitt — Ecowitt Weather Station plugin for HomeCore
+# Copy to config.dev.toml and fill in your values.
 #
 # Supports two data ingestion modes:
 # 1. HTTP POST receiver: Gateway POSTs data to this plugin (primary)
