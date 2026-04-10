@@ -13,8 +13,7 @@ impl Config {
     pub fn load(path: &str) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("Cannot read config {path}: {e}"))?;
-        toml::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("Config parse error in {path}: {e}"))
+        toml::from_str(&text).map_err(|e| anyhow::anyhow!("Config parse error in {path}: {e}"))
     }
 }
 
@@ -30,9 +29,15 @@ pub struct HomecoreConfig {
     pub password: String,
 }
 
-fn default_broker_host() -> String { "127.0.0.1".into() }
-fn default_broker_port() -> u16    { 1883 }
-fn default_plugin_id()   -> String { "plugin.ecowitt".into() }
+fn default_broker_host() -> String {
+    "127.0.0.1".into()
+}
+fn default_broker_port() -> u16 {
+    1883
+}
+fn default_plugin_id() -> String {
+    "plugin.ecowitt".into()
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct EcowittConfig {
@@ -49,6 +54,12 @@ pub struct EcowittConfig {
     pub device_prefix: String,
 }
 
-fn default_listen_port()    -> u16    { 8888 }
-fn default_poll_interval()  -> u64    { 60 }
-fn default_device_prefix()  -> String { "ecowitt".into() }
+fn default_listen_port() -> u16 {
+    8888
+}
+fn default_poll_interval() -> u64 {
+    60
+}
+fn default_device_prefix() -> String {
+    "ecowitt".into()
+}

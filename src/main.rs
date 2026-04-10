@@ -39,7 +39,14 @@ async fn main() {
 
     for attempt in 1..=MAX_ATTEMPTS {
         info!(attempt, max = MAX_ATTEMPTS, "Starting hc-ecowitt plugin");
-        match try_start(&cfg, &config_path, log_level_handle.clone(), mqtt_log_handle.clone()).await {
+        match try_start(
+            &cfg,
+            &config_path,
+            log_level_handle.clone(),
+            mqtt_log_handle.clone(),
+        )
+        .await
+        {
             Ok(()) => return,
             Err(e) => {
                 if attempt < MAX_ATTEMPTS {
@@ -54,7 +61,13 @@ async fn main() {
     }
 }
 
-fn init_logging(config_path: &str) -> (tracing_appender::non_blocking::WorkerGuard, hc_logging::LogLevelHandle, plugin_sdk_rs::mqtt_log_layer::MqttLogHandle) {
+fn init_logging(
+    config_path: &str,
+) -> (
+    tracing_appender::non_blocking::WorkerGuard,
+    hc_logging::LogLevelHandle,
+    plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
+) {
     #[derive(serde::Deserialize, Default)]
     struct Bootstrap {
         #[serde(default)]
@@ -64,7 +77,12 @@ fn init_logging(config_path: &str) -> (tracing_appender::non_blocking::WorkerGua
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default();
-    logging::init_logging(config_path, "hc-ecowitt", "hc_ecowitt=info", &bootstrap.logging)
+    logging::init_logging(
+        config_path,
+        "hc-ecowitt",
+        "hc_ecowitt=info",
+        &bootstrap.logging,
+    )
 }
 
 async fn try_start(
@@ -77,8 +95,8 @@ async fn try_start(
     let sdk_config = PluginConfig {
         broker_host: cfg.homecore.broker_host.clone(),
         broker_port: cfg.homecore.broker_port,
-        plugin_id:   cfg.homecore.plugin_id.clone(),
-        password:    cfg.homecore.password.clone(),
+        plugin_id: cfg.homecore.plugin_id.clone(),
+        password: cfg.homecore.password.clone(),
     };
 
     let client = PluginClient::connect(sdk_config).await?;
@@ -106,10 +124,7 @@ async fn try_start(
 
     // Start SDK event loop (weather sensors are read-only — no commands).
     tokio::spawn(async move {
-        if let Err(e) = client
-            .run_managed(|_device_id, _payload| {}, mgmt)
-            .await
-        {
+        if let Err(e) = client.run_managed(|_device_id, _payload| {}, mgmt).await {
             error!(error = %e, "SDK event loop exited with error");
         }
     });
@@ -117,11 +132,7 @@ async fn try_start(
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // --- Create shared state with dynamic device registry ---
-    let registry = DeviceRegistry::new(
-        publisher,
-        cfg.homecore.plugin_id.clone(),
-        config_path,
-    );
+    let registry = DeviceRegistry::new(publisher, cfg.homecore.plugin_id.clone(), config_path);
 
     let shared = Arc::new(SharedState {
         registry: Mutex::new(registry),

@@ -3,8 +3,8 @@
 //! Each top-level key in the response (common_list, rain, co2, ch_temp, etc.)
 //! produces one or more (device_id, device_type, state_json) entries.
 
-use serde_json::{json, Value};
 use crate::id_map::{common_id_to_attr, parse_value};
+use serde_json::{json, Value};
 
 /// A parsed device update ready to be published to HomeCore.
 #[derive(Debug)]
@@ -62,12 +62,33 @@ pub fn parse_livedata(data: &Value, prefix: &str) -> Vec<DeviceUpdate> {
     }
 
     // Multi-channel sensors
-    parse_multi_channel(data, "ch_aisle", prefix, "aisle", "temperature_sensor", &mut updates);
-    parse_multi_channel(data, "ch_temp", prefix, "temp", "temperature_sensor", &mut updates);
+    parse_multi_channel(
+        data,
+        "ch_aisle",
+        prefix,
+        "aisle",
+        "temperature_sensor",
+        &mut updates,
+    );
+    parse_multi_channel(
+        data,
+        "ch_temp",
+        prefix,
+        "temp",
+        "temperature_sensor",
+        &mut updates,
+    );
     parse_multi_channel(data, "ch_soil", prefix, "soil", "soil_sensor", &mut updates);
     parse_multi_channel(data, "ch_leaf", prefix, "leaf", "leaf_sensor", &mut updates);
     parse_multi_channel(data, "ch_leak", prefix, "leak", "leak_sensor", &mut updates);
-    parse_multi_channel(data, "ch_pm25", prefix, "pm25", "air_quality_sensor", &mut updates);
+    parse_multi_channel(
+        data,
+        "ch_pm25",
+        prefix,
+        "pm25",
+        "air_quality_sensor",
+        &mut updates,
+    );
     parse_multi_channel(data, "ch_lds", prefix, "lds", "level_sensor", &mut updates);
     parse_multi_channel(data, "ch_ec", prefix, "ec", "ec_sensor", &mut updates);
 
@@ -165,14 +186,14 @@ fn parse_rain_array(items: &[Value], prefix: &str, suffix: &str) -> Option<Devic
         let val_str = item["val"].as_str().unwrap_or("0");
 
         let attr = match id {
-            "0x0D" | "0xD"  => "rain_event",
-            "0x0E" | "0xE"  => "rain_rate",
-            "0x10"          => "rain_day",
-            "0x11"          => "rain_week",
-            "0x12"          => "rain_month",
-            "0x13"          => "rain_year",
-            "0x14"          => "rain_total",
-            _               => continue,
+            "0x0D" | "0xD" => "rain_event",
+            "0x0E" | "0xE" => "rain_rate",
+            "0x10" => "rain_day",
+            "0x11" => "rain_week",
+            "0x12" => "rain_month",
+            "0x13" => "rain_year",
+            "0x14" => "rain_total",
+            _ => continue,
         };
 
         let (v, unit) = parse_value(val_str);
@@ -187,12 +208,18 @@ fn parse_rain_array(items: &[Value], prefix: &str, suffix: &str) -> Option<Devic
         }
     }
 
-    if state.is_empty() { return None; }
+    if state.is_empty() {
+        return None;
+    }
 
     Some(DeviceUpdate {
         device_id: format!("{prefix}_{suffix}"),
         device_type: "rain_sensor",
-        name: if suffix == "piezo_rain" { "Piezo Rain Sensor".into() } else { "Rain Sensor".into() },
+        name: if suffix == "piezo_rain" {
+            "Piezo Rain Sensor".into()
+        } else {
+            "Rain Sensor".into()
+        },
         state: Value::Object(state),
     })
 }
@@ -207,7 +234,9 @@ fn parse_lightning(item: &Value, prefix: &str) -> DeviceUpdate {
     if let Some(d) = item.get("distance").and_then(|v| v.as_str()) {
         let (v, unit) = parse_value(d);
         state.insert("distance".into(), json!(v));
-        if !unit.is_empty() { state.insert("distance_unit".into(), json!(unit)); }
+        if !unit.is_empty() {
+            state.insert("distance_unit".into(), json!(unit));
+        }
     }
     if let Some(c) = item.get("count").and_then(|v| v.as_str()) {
         let (v, _) = parse_value(c);
@@ -237,12 +266,19 @@ fn parse_co2(item: &Value, prefix: &str) -> DeviceUpdate {
     let mut state = serde_json::Map::new();
 
     for (key, attr) in &[
-        ("temp", "temperature"), ("humidity", "humidity"),
-        ("PM25", "pm25"), ("PM25_RealAQI", "pm25_aqi"), ("PM25_24HAQI", "pm25_24h_aqi"),
-        ("PM10", "pm10"), ("PM10_RealAQI", "pm10_aqi"), ("PM10_24HAQI", "pm10_24h_aqi"),
-        ("PM1", "pm1"), ("PM1_RealAQI", "pm1_aqi"),
+        ("temp", "temperature"),
+        ("humidity", "humidity"),
+        ("PM25", "pm25"),
+        ("PM25_RealAQI", "pm25_aqi"),
+        ("PM25_24HAQI", "pm25_24h_aqi"),
+        ("PM10", "pm10"),
+        ("PM10_RealAQI", "pm10_aqi"),
+        ("PM10_24HAQI", "pm10_24h_aqi"),
+        ("PM1", "pm1"),
+        ("PM1_RealAQI", "pm1_aqi"),
         ("PM4", "pm4"),
-        ("CO2", "co2"), ("CO2_24H", "co2_24h"),
+        ("CO2", "co2"),
+        ("CO2_24H", "co2_24h"),
         ("battery", "battery"),
     ] {
         if let Some(v) = item.get(*key).and_then(|v| v.as_str()) {
@@ -274,7 +310,9 @@ fn parse_multi_channel(
     device_type: &'static str,
     updates: &mut Vec<DeviceUpdate>,
 ) {
-    let Some(items) = data.get(key).and_then(|v| v.as_array()) else { return };
+    let Some(items) = data.get(key).and_then(|v| v.as_array()) else {
+        return;
+    };
 
     for item in items {
         let channel = item["channel"].as_str().unwrap_or("0");
@@ -283,10 +321,15 @@ fn parse_multi_channel(
 
         // Extract all known fields
         for (field, attr) in &[
-            ("temp", "temperature"), ("humidity", "humidity"),
-            ("voltage", "voltage"), ("air", "air"), ("depth", "depth"),
+            ("temp", "temperature"),
+            ("humidity", "humidity"),
+            ("voltage", "voltage"),
+            ("air", "air"),
+            ("depth", "depth"),
             ("status", "status"),
-            ("PM25", "pm25"), ("PM25_RealAQI", "pm25_aqi"), ("PM25_24HAQI", "pm25_24h_aqi"),
+            ("PM25", "pm25"),
+            ("PM25_RealAQI", "pm25_aqi"),
+            ("PM25_24HAQI", "pm25_24h_aqi"),
         ] {
             if let Some(v) = item.get(*field).and_then(|v| v.as_str()) {
                 if *field == "status" {
@@ -325,13 +368,13 @@ fn parse_multi_channel(
 fn slug_to_label(slug: &str) -> &str {
     match slug {
         "aisle" => "Temp/Humidity",
-        "temp"  => "Temperature",
-        "soil"  => "Soil Moisture",
-        "leaf"  => "Leaf Wetness",
-        "leak"  => "Leak Detector",
-        "pm25"  => "PM2.5 Sensor",
-        "lds"   => "Level Sensor",
-        "ec"    => "EC Sensor",
-        _       => slug,
+        "temp" => "Temperature",
+        "soil" => "Soil Moisture",
+        "leaf" => "Leaf Wetness",
+        "leak" => "Leak Detector",
+        "pm25" => "PM2.5 Sensor",
+        "lds" => "Level Sensor",
+        "ec" => "EC Sensor",
+        _ => slug,
     }
 }

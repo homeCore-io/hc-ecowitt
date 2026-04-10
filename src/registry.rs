@@ -1,9 +1,9 @@
 //! Dynamic device registry — auto-registers devices with HomeCore on first sight.
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
 use anyhow::Result;
 use plugin_sdk_rs::DevicePublisher;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::parser::DeviceUpdate;
@@ -42,12 +42,16 @@ impl DeviceRegistry {
         }
 
         for update in updates {
-            let _ = self.publisher.publish_state(&update.device_id, &update.state).await;
+            let _ = self
+                .publisher
+                .publish_state(&update.device_id, &update.state)
+                .await;
         }
     }
 
     async fn register_device(&mut self, update: &DeviceUpdate) {
-        if let Err(e) = self.publisher
+        if let Err(e) = self
+            .publisher
             .register_device_full(
                 &update.device_id,
                 &update.name,
@@ -65,7 +69,10 @@ impl DeviceRegistry {
             warn!(device_id = %update.device_id, error = %e, "Failed to subscribe commands");
         }
 
-        let _ = self.publisher.publish_availability(&update.device_id, true).await;
+        let _ = self
+            .publisher
+            .publish_availability(&update.device_id, true)
+            .await;
 
         info!(device_id = %update.device_id, device_type = update.device_type, name = %update.name, "Auto-registered new device");
         self.registered.insert(update.device_id.clone());
@@ -77,7 +84,11 @@ impl DeviceRegistry {
     pub async fn cleanup_stale(&mut self) {
         let previous = self.load_cache();
         for stale_id in previous.iter().filter(|id| !self.registered.contains(*id)) {
-            if let Err(e) = self.publisher.unregister_device(&self.plugin_id, stale_id).await {
+            if let Err(e) = self
+                .publisher
+                .unregister_device(&self.plugin_id, stale_id)
+                .await
+            {
                 warn!(device_id = %stale_id, error = %e, "Failed to unregister stale device");
             } else {
                 info!(device_id = %stale_id, "Unregistered stale device");

@@ -4,16 +4,24 @@
 //! as `application/x-www-form-urlencoded`.  Field names follow Ecowitt/WU
 //! conventions (e.g. `tempf`, `humidity`, `windspeedmph`, `dailyrainin`).
 
-use std::collections::{HashMap, HashSet};
 use serde_json::{json, Map, Value};
+use std::collections::{HashMap, HashSet};
 use tracing::debug;
 
 use crate::parser::DeviceUpdate;
 
 /// Fields that are metadata / not sensor data — don't warn about them.
 const KNOWN_META: &[&str] = &[
-    "PASSKEY", "stationtype", "dateutc", "freq", "model", "runtime", "heap", "interval",
-    "ws90_ver", "ws90cap_volt",
+    "PASSKEY",
+    "stationtype",
+    "dateutc",
+    "freq",
+    "model",
+    "runtime",
+    "heap",
+    "interval",
+    "ws90_ver",
+    "ws90cap_volt",
 ];
 
 /// Parse form-encoded POST fields into device updates.
@@ -65,7 +73,8 @@ pub fn parse_form_data(fields: &HashMap<String, String>, prefix: &str) -> Vec<De
     }
 
     // Log any unrecognized fields so missing sensors are easy to spot.
-    let unknown: Vec<&str> = fields.keys()
+    let unknown: Vec<&str> = fields
+        .keys()
         .map(|k| k.as_str())
         .filter(|k| !consumed.contains(*k) && !KNOWN_META.contains(k))
         .collect();
@@ -80,14 +89,21 @@ pub fn parse_form_data(fields: &HashMap<String, String>, prefix: &str) -> Vec<De
 // Outdoor weather station
 // ---------------------------------------------------------------------------
 
-fn parse_outdoor(fields: &HashMap<String, String>, prefix: &str, consumed: &mut HashSet<String>) -> Option<DeviceUpdate> {
+fn parse_outdoor(
+    fields: &HashMap<String, String>,
+    prefix: &str,
+    consumed: &mut HashSet<String>,
+) -> Option<DeviceUpdate> {
     let mut state = Map::new();
 
     let outdoor_fields: &[(&str, &str)] = &[
-        ("tempf", "temperature"), ("tempc", "temperature"),
+        ("tempf", "temperature"),
+        ("tempc", "temperature"),
         ("humidity", "humidity"),
-        ("dewptf", "dewpoint"), ("dewptc", "dewpoint"),
-        ("windchillf", "windchill"), ("windchillc", "windchill"),
+        ("dewptf", "dewpoint"),
+        ("dewptc", "dewpoint"),
+        ("windchillf", "windchill"),
+        ("windchillc", "windchill"),
         ("feelslikef", "feels_like"),
         ("heatindexf", "heat_index"),
         ("vpd", "vpd"),
@@ -121,7 +137,9 @@ fn parse_outdoor(fields: &HashMap<String, String>, prefix: &str, consumed: &mut 
         state.insert("temperature_unit".into(), json!("°C"));
     }
 
-    if state.is_empty() { return None; }
+    if state.is_empty() {
+        return None;
+    }
 
     // Outdoor battery (wh65batt, wh68batt, wh80batt, wh90batt, ws90batt)
     for key in ["wh65batt", "wh68batt", "wh80batt", "wh90batt", "ws90batt"] {
@@ -144,11 +162,16 @@ fn parse_outdoor(fields: &HashMap<String, String>, prefix: &str, consumed: &mut 
 // Indoor sensor
 // ---------------------------------------------------------------------------
 
-fn parse_indoor(fields: &HashMap<String, String>, prefix: &str, consumed: &mut HashSet<String>) -> Option<DeviceUpdate> {
+fn parse_indoor(
+    fields: &HashMap<String, String>,
+    prefix: &str,
+    consumed: &mut HashSet<String>,
+) -> Option<DeviceUpdate> {
     let mut state = Map::new();
 
     for &(field, attr) in &[
-        ("tempinf", "temperature"), ("tempinc", "temperature"),
+        ("tempinf", "temperature"),
+        ("tempinc", "temperature"),
         ("humidityin", "humidity"),
     ] {
         if insert_f64(&mut state, fields, field, attr) {
@@ -162,7 +185,9 @@ fn parse_indoor(fields: &HashMap<String, String>, prefix: &str, consumed: &mut H
         state.insert("temperature_unit".into(), json!("°C"));
     }
 
-    if state.is_empty() { return None; }
+    if state.is_empty() {
+        return None;
+    }
 
     // Indoor sensor battery (wh25batt, wh26batt)
     for key in ["wh25batt", "wh26batt"] {
@@ -185,18 +210,30 @@ fn parse_indoor(fields: &HashMap<String, String>, prefix: &str, consumed: &mut H
 // Rain sensor
 // ---------------------------------------------------------------------------
 
-fn parse_rain(fields: &HashMap<String, String>, prefix: &str, consumed: &mut HashSet<String>) -> Option<DeviceUpdate> {
+fn parse_rain(
+    fields: &HashMap<String, String>,
+    prefix: &str,
+    consumed: &mut HashSet<String>,
+) -> Option<DeviceUpdate> {
     let mut state = Map::new();
 
     let rain_fields: &[(&str, &str)] = &[
-        ("rainratein", "rain_rate"), ("rainratemm", "rain_rate"),
-        ("eventrainin", "rain_event"), ("eventrainmm", "rain_event"),
-        ("hourlyrainin", "rain_hour"), ("hourlyrainmm", "rain_hour"),
-        ("dailyrainin", "rain_day"), ("dailyrainmm", "rain_day"),
-        ("weeklyrainin", "rain_week"), ("weeklyrainmm", "rain_week"),
-        ("monthlyrainin", "rain_month"), ("monthlyrainmm", "rain_month"),
-        ("yearlyrainin", "rain_year"), ("yearlyrainmm", "rain_year"),
-        ("totalrainin", "rain_total"), ("totalrainmm", "rain_total"),
+        ("rainratein", "rain_rate"),
+        ("rainratemm", "rain_rate"),
+        ("eventrainin", "rain_event"),
+        ("eventrainmm", "rain_event"),
+        ("hourlyrainin", "rain_hour"),
+        ("hourlyrainmm", "rain_hour"),
+        ("dailyrainin", "rain_day"),
+        ("dailyrainmm", "rain_day"),
+        ("weeklyrainin", "rain_week"),
+        ("weeklyrainmm", "rain_week"),
+        ("monthlyrainin", "rain_month"),
+        ("monthlyrainmm", "rain_month"),
+        ("yearlyrainin", "rain_year"),
+        ("yearlyrainmm", "rain_year"),
+        ("totalrainin", "rain_total"),
+        ("totalrainmm", "rain_total"),
         // Piezo rain
         ("rrain_piezo", "rain_rate_piezo"),
         ("erain_piezo", "rain_event_piezo"),
@@ -215,7 +252,9 @@ fn parse_rain(fields: &HashMap<String, String>, prefix: &str, consumed: &mut Has
         }
     }
 
-    if state.is_empty() { return None; }
+    if state.is_empty() {
+        return None;
+    }
 
     // Rain gauge battery
     for key in ["wh40batt", "wh90batt"] {
@@ -264,7 +303,9 @@ fn parse_numbered_temp(
             consumed.insert(batt_key.clone());
         }
 
-        if state.is_empty() { continue; }
+        if state.is_empty() {
+            continue;
+        }
 
         if fields.contains_key(&temp_f_key) {
             state.insert("temperature_unit".into(), json!("°F"));
@@ -307,7 +348,9 @@ fn parse_soil_moisture(
             consumed.insert(batt_key.clone());
         }
 
-        if state.is_empty() { continue; }
+        if state.is_empty() {
+            continue;
+        }
 
         updates.push(DeviceUpdate {
             device_id: format!("{prefix}_soil_{ch}"),
@@ -344,7 +387,9 @@ fn parse_soil_ec(
             consumed.insert(temp_key.clone());
         }
 
-        if state.is_empty() { continue; }
+        if state.is_empty() {
+            continue;
+        }
 
         updates.push(DeviceUpdate {
             device_id: format!("{prefix}_ec_{ch}"),
@@ -377,7 +422,9 @@ fn parse_leaf_wetness(
             consumed.insert(batt_key.clone());
         }
 
-        if state.is_empty() { continue; }
+        if state.is_empty() {
+            continue;
+        }
 
         updates.push(DeviceUpdate {
             device_id: format!("{prefix}_leaf_{ch}"),
@@ -447,7 +494,9 @@ fn parse_pm25(
             consumed.insert(batt_key.clone());
         }
 
-        if state.is_empty() { continue; }
+        if state.is_empty() {
+            continue;
+        }
 
         updates.push(DeviceUpdate {
             device_id: format!("{prefix}_pm25_{ch}"),
@@ -462,14 +511,15 @@ fn parse_pm25(
 // Lightning
 // ---------------------------------------------------------------------------
 
-fn parse_lightning(fields: &HashMap<String, String>, prefix: &str, consumed: &mut HashSet<String>) -> Option<DeviceUpdate> {
+fn parse_lightning(
+    fields: &HashMap<String, String>,
+    prefix: &str,
+    consumed: &mut HashSet<String>,
+) -> Option<DeviceUpdate> {
     let mut state = Map::new();
 
     // Distance field is just "lightning" (not "lightning_distance")
-    for &(field, attr) in &[
-        ("lightning", "distance"),
-        ("lightning_num", "strike_count"),
-    ] {
+    for &(field, attr) in &[("lightning", "distance"), ("lightning_num", "strike_count")] {
         if insert_f64(&mut state, fields, field, attr) {
             consumed.insert(field.into());
         }
@@ -482,7 +532,9 @@ fn parse_lightning(fields: &HashMap<String, String>, prefix: &str, consumed: &mu
         consumed.insert("wh57batt".into());
     }
 
-    if state.is_empty() { return None; }
+    if state.is_empty() {
+        return None;
+    }
 
     Some(DeviceUpdate {
         device_id: format!("{prefix}_lightning"),
@@ -496,15 +548,24 @@ fn parse_lightning(fields: &HashMap<String, String>, prefix: &str, consumed: &mu
 // CO2 / air quality (WH45, WH46D)
 // ---------------------------------------------------------------------------
 
-fn parse_co2(fields: &HashMap<String, String>, prefix: &str, consumed: &mut HashSet<String>) -> Option<DeviceUpdate> {
+fn parse_co2(
+    fields: &HashMap<String, String>,
+    prefix: &str,
+    consumed: &mut HashSet<String>,
+) -> Option<DeviceUpdate> {
     let mut state = Map::new();
 
     let co2_fields: &[(&str, &str)] = &[
-        ("co2", "co2"), ("co2_24h", "co2_24h"),
-        ("co2in", "co2_indoor"), ("co2in_24h", "co2_indoor_24h"),
-        ("pm25_co2", "pm25"), ("pm25_24h_co2", "pm25_24h"),
-        ("pm10_co2", "pm10"), ("pm10_24h_co2", "pm10_24h"),
-        ("tf_co2", "temperature"), ("humi_co2", "humidity"),
+        ("co2", "co2"),
+        ("co2_24h", "co2_24h"),
+        ("co2in", "co2_indoor"),
+        ("co2in_24h", "co2_indoor_24h"),
+        ("pm25_co2", "pm25"),
+        ("pm25_24h_co2", "pm25_24h"),
+        ("pm10_co2", "pm10"),
+        ("pm10_24h_co2", "pm10_24h"),
+        ("tf_co2", "temperature"),
+        ("humi_co2", "humidity"),
         ("co2_batt", "battery"),
     ];
 
@@ -514,7 +575,9 @@ fn parse_co2(fields: &HashMap<String, String>, prefix: &str, consumed: &mut Hash
         }
     }
 
-    if state.is_empty() { return None; }
+    if state.is_empty() {
+        return None;
+    }
 
     Some(DeviceUpdate {
         device_id: format!("{prefix}_co2"),
@@ -529,7 +592,12 @@ fn parse_co2(fields: &HashMap<String, String>, prefix: &str, consumed: &mut Hash
 // ---------------------------------------------------------------------------
 
 /// Insert a field value as f64. Returns true if inserted.
-fn insert_f64(state: &mut Map<String, Value>, fields: &HashMap<String, String>, key: &str, attr: &str) -> bool {
+fn insert_f64(
+    state: &mut Map<String, Value>,
+    fields: &HashMap<String, String>,
+    key: &str,
+    attr: &str,
+) -> bool {
     if let Some(v) = fields.get(key).and_then(|s| s.parse::<f64>().ok()) {
         state.insert(attr.into(), json!(v));
         true
@@ -539,7 +607,12 @@ fn insert_f64(state: &mut Map<String, Value>, fields: &HashMap<String, String>, 
 }
 
 /// Same as insert_f64 but for dynamically-built key strings.
-fn insert_f64_dyn(state: &mut Map<String, Value>, fields: &HashMap<String, String>, key: &str, attr: &str) -> bool {
+fn insert_f64_dyn(
+    state: &mut Map<String, Value>,
+    fields: &HashMap<String, String>,
+    key: &str,
+    attr: &str,
+) -> bool {
     if let Some(v) = fields.get(key).and_then(|s| s.parse::<f64>().ok()) {
         state.insert(attr.into(), json!(v));
         true
