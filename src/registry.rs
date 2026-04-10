@@ -13,6 +13,7 @@ use crate::parser::DeviceUpdate;
 pub struct DeviceRegistry {
     registered: HashSet<String>,
     publisher: DevicePublisher,
+    #[allow(dead_code)]
     plugin_id: String,
     cache_path: PathBuf,
 }
@@ -72,6 +73,7 @@ impl DeviceRegistry {
     }
 
     /// Clean up devices that were registered previously but are no longer seen.
+    #[allow(dead_code)]
     pub async fn cleanup_stale(&mut self) {
         let previous = self.load_cache();
         for stale_id in previous.iter().filter(|id| !self.registered.contains(*id)) {
@@ -83,6 +85,7 @@ impl DeviceRegistry {
         }
     }
 
+    #[allow(dead_code)]
     fn load_cache(&self) -> Vec<String> {
         std::fs::read_to_string(&self.cache_path)
             .ok()
