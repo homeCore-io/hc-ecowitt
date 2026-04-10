@@ -1,10 +1,12 @@
 [workspace]
 
 [package]
-name    = "hc-ecowitt"
-version = "0.1.0"
-edition = "2021"
-license = "MIT OR Apache-2.0"
+name        = "hc-ecowitt"
+version     = "0.1.0"
+edition     = "2021"
+license     = "MIT OR Apache-2.0"
+description = "Ecowitt weather station plugin for homeCore"
+repository  = "https://github.com/homeCore-io/hc-ecowitt"
 
 [[bin]]
 name = "hc-ecowitt"
