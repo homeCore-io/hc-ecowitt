@@ -25,11 +25,27 @@ listen_port = 8888
 
 # Optional: gateway IP for polling mode (GET /get_livedata_info)
 # Uncomment to enable polling as a supplement or alternative to POST mode.
+# Also used as the default target for the manifest's cgi-bin actions
+# (refresh_sensors, get_gateway_info, set_custom_server, etc.).
 # gateway_ip = "10.0.10.50"
 # poll_interval_secs = 60
 
+# Optional: explicit list of console IPs the manifest's
+# `discover_gateways` action should HTTP-probe alongside the UDP
+# CMD_BROADCAST scan. Use this when consoles live on a VLAN this
+# plugin's host can route to but UDP broadcast can't reach (typical
+# for IoT segments behind a managed switch). Each listed host is
+# queried via `/get_device_info?` whenever an action needs to
+# resolve a gateway IP and the in-memory cache is empty.
+# manual_hosts = ["10.0.20.5", "10.0.30.5"]
+
 # Prefix for HomeCore device IDs (e.g., "ecowitt_weather", "ecowitt_temp_1")
 # device_prefix = "ecowitt"
+
+# The plugin persists its successfully-resolved gateway IP into
+# `.cached-gateway-ip` next to this config file, so a once-discovered
+# console survives plugin restarts. Delete the file to force a
+# fresh discovery on next startup.
 
 # [logging]
 # dir = "logs"

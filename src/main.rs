@@ -108,13 +108,27 @@ async fn try_start(
     );
     let publisher = client.device_publisher();
 
-    // Cached gateway IP for the management custom_handler. Seeded
-    // from config; populated by `discover_gateways` so subsequent
-    // actions don't have to re-broadcast. A single mutex is plenty —
-    // contention is per-action, not per-frame.
+    // Cached gateway IP for the management custom_handler.
+    //
+    // Resolution priority on read: configured > on-disk cache. So
+    // an explicit [ecowitt].gateway_ip always wins.
+    //
+    // The on-disk cache `.cached-gateway-ip` next to config.toml
+    // makes the previously-discovered IP survive a plugin restart —
+    // without it, every restart needed a fresh `Discover gateways`
+    // click to re-prime an in-memory cache. The cache is updated
+    // whenever any resolution path succeeds.
+    let cache_path = cached_gateway_ip_path(config_path);
+    let initial_cache = cfg
+        .ecowitt
+        .gateway_ip
+        .clone()
+        .or_else(|| std::fs::read_to_string(&cache_path).ok().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty());
     let gateway_ip: std::sync::Arc<std::sync::Mutex<Option<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(cfg.ecowitt.gateway_ip.clone()));
+        std::sync::Arc::new(std::sync::Mutex::new(initial_cache));
     let gateway_for_mgmt = std::sync::Arc::clone(&gateway_ip);
+    let cache_path_for_handler = cache_path.clone();
     // Static manual_hosts list, captured once at startup. The
     // dispatcher probes these via HTTP /get_device_info to reach
     // consoles on VLANs UDP broadcast can't traverse.
@@ -140,6 +154,7 @@ async fn try_start(
             let gateway = std::sync::Arc::clone(&gateway_for_mgmt);
             let manual = manual_hosts.clone();
             let listen_port = listen_port_for_handler;
+            let cache_path = cache_path_for_handler.clone();
             let action_for_err = action.clone();
             // Bridge the SDK's sync custom_handler signature to async
             // work via a one-shot tokio runtime (same pattern as
@@ -150,7 +165,15 @@ async fn try_start(
                     .build()
                     .ok()?;
                 rt.block_on(async move {
-                    run_action(&action, &cmd_owned, gateway, &manual, listen_port).await
+                    run_action(
+                        &action,
+                        &cmd_owned,
+                        gateway,
+                        &manual,
+                        listen_port,
+                        &cache_path,
+                    )
+                    .await
                 })
             })
             .join()
@@ -507,6 +530,7 @@ async fn run_action(
     gateway_cache: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     manual_hosts: &[String],
     listen_port: u16,
+    cache_path: &std::path::Path,
 ) -> Option<serde_json::Value> {
     use serde_json::json;
     use std::time::Duration;
@@ -552,15 +576,14 @@ async fn run_action(
                     .and_then(|v| v.get("host").and_then(|s| s.as_str()).map(str::to_string))
             });
         if let Some(ref ip) = selected {
-            if let Ok(mut g) = gateway_cache.lock() {
-                *g = Some(ip.clone());
-            }
+            update_cache(&gateway_cache, cache_path, ip);
         }
         return Some(json!({
             "status": "ok",
             "discovered": found,
             "count": found.len(),
             "selected": selected,
+            "manual_hosts_configured": manual_hosts.len(),
         }));
     }
 
@@ -569,7 +592,7 @@ async fn run_action(
     //   2. cached IP (from prior discovery or initial config)
     //   3. configured manual_hosts (first that answers HTTP probe)
     //   4. UDP discovery (cache the result)
-    let ip = match resolve_gateway_ip(cmd, &gateway_cache, manual_hosts).await {
+    let ip = match resolve_gateway_ip(cmd, &gateway_cache, manual_hosts, cache_path).await {
         Ok(ip) => ip,
         Err(msg) => {
             return Some(json!({
@@ -659,10 +682,12 @@ async fn resolve_gateway_ip(
     cmd: &serde_json::Value,
     cache: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
     manual_hosts: &[String],
+    cache_path: &std::path::Path,
 ) -> std::result::Result<String, String> {
     if let Some(host) = cmd.get("host").and_then(|v| v.as_str()) {
         let host = host.trim();
         if !host.is_empty() {
+            update_cache(cache, cache_path, host);
             return Ok(host.to_string());
         }
     }
@@ -676,22 +701,23 @@ async fn resolve_gateway_ip(
 
     // Manual hosts before UDP. They're explicitly configured by the
     // operator, so prefer them — they're also faster (one HTTP call
-    // vs a 3s broadcast wait).
+    // vs a 3s broadcast wait). Track which ones we tried for the
+    // error message in case all of them fail.
+    let mut manual_attempts: Vec<String> = Vec::new();
     for host in manual_hosts {
         let url = format!("http://{host}/get_device_info?");
         if http_get_json(&url).await.is_ok() {
-            if let Ok(mut g) = cache.lock() {
-                *g = Some(host.clone());
-            }
+            update_cache(cache, cache_path, host);
             return Ok(host.clone());
         }
+        manual_attempts.push(host.clone());
     }
 
     let found =
         udp_discovery::discover_gateways(std::time::Duration::from_secs(3))
             .await
             .map_err(|e| format!("UDP discovery fallback failed: {e}"))?;
-    let ip = found
+    if let Some(ip) = found
         .first()
         .and_then(|v| v.get("ip").and_then(|s| s.as_str()).map(str::to_string))
         .or_else(|| {
@@ -699,17 +725,62 @@ async fn resolve_gateway_ip(
                 .first()
                 .and_then(|v| v.get("host").and_then(|s| s.as_str()).map(str::to_string))
         })
-        .ok_or_else(|| {
-            "no `host` param, no cached gateway, no manual_hosts responded, \
-             and UDP discovery returned no consoles. Set [ecowitt].gateway_ip \
-             or [ecowitt].manual_hosts in config.toml, or pass `host` as an \
-             action param."
-                .to_string()
-        })?;
-    if let Ok(mut g) = cache.lock() {
-        *g = Some(ip.clone());
+    {
+        update_cache(cache, cache_path, &ip);
+        return Ok(ip);
     }
-    Ok(ip)
+
+    // Every fallback exhausted — be specific about what's missing
+    // so the operator can act without reading the source.
+    let manual_status = if manual_hosts.is_empty() {
+        "[ecowitt].manual_hosts is empty".to_string()
+    } else {
+        format!(
+            "[ecowitt].manual_hosts didn't respond ({})",
+            manual_attempts.join(", ")
+        )
+    };
+    Err(format!(
+        "no gateway IP available — none of: \
+         (1) `host` action param, \
+         (2) cached IP from a prior discover_gateways, \
+         (3) {manual_status}, \
+         (4) UDP CMD_BROADCAST on port 45000 (returned 0 consoles in 3s — \
+         likely the console is on a VLAN this plugin's broadcast can't reach). \
+         Fix: set `[ecowitt].gateway_ip = \"…\"` or \
+         `[ecowitt].manual_hosts = [\"…\"]` in config.toml, or fill in the \
+         `host` field on this action."
+    ))
+}
+
+/// Update the in-memory + on-disk cache of the resolved gateway IP.
+/// Disk writes are best-effort — we don't fail the action just
+/// because the cache file isn't writable.
+fn update_cache(
+    cache: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    cache_path: &std::path::Path,
+    ip: &str,
+) {
+    if let Ok(mut g) = cache.lock() {
+        *g = Some(ip.to_string());
+    }
+    if let Some(parent) = cache_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(cache_path, ip.as_bytes()) {
+        tracing::warn!(
+            path = %cache_path.display(),
+            error = %e,
+            "could not persist gateway-ip cache"
+        );
+    }
+}
+
+fn cached_gateway_ip_path(config_path: &str) -> std::path::PathBuf {
+    std::path::Path::new(config_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(".cached-gateway-ip")
 }
 
 /// Common shape: GET a cgi-bin endpoint, parse JSON, wrap in a
