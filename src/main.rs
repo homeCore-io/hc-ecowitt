@@ -133,10 +133,6 @@ async fn try_start(
     // dispatcher probes these via HTTP /get_device_info to reach
     // consoles on VLANs UDP broadcast can't traverse.
     let manual_hosts = cfg.ecowitt.manual_hosts.clone();
-    // listen_port is the homeCore-side port consoles POST to. The
-    // `set_custom_server` action defaults its `port` field to this
-    // so the operator usually doesn't have to fill it in.
-    let listen_port_for_handler = cfg.ecowitt.listen_port;
 
     // Enable management protocol + capability manifest.
     let mgmt = client
@@ -153,7 +149,6 @@ async fn try_start(
             let cmd_owned = cmd.clone();
             let gateway = std::sync::Arc::clone(&gateway_for_mgmt);
             let manual = manual_hosts.clone();
-            let listen_port = listen_port_for_handler;
             let cache_path = cache_path_for_handler.clone();
             let action_for_err = action.clone();
             // Bridge the SDK's sync custom_handler signature to async
@@ -165,15 +160,7 @@ async fn try_start(
                     .build()
                     .ok()?;
                 rt.block_on(async move {
-                    run_action(
-                        &action,
-                        &cmd_owned,
-                        gateway,
-                        &manual,
-                        listen_port,
-                        &cache_path,
-                    )
-                    .await
+                    run_action(&action, &cmd_owned, gateway, &manual, &cache_path).await
                 })
             })
             .join()
@@ -184,6 +171,24 @@ async fn try_start(
                 "error": format!("action '{action_for_err}' failed or is unknown"),
             })))
         });
+
+    // Streaming action: set_custom_server. Auto-detect + POST +
+    // possible GET fallback can stack up past the 5s management
+    // RPC timeout, so it lives here instead of inside the sync
+    // dispatcher above.
+    let stream_handle = StreamHandle {
+        gateway_cache: std::sync::Arc::clone(&gateway_ip),
+        manual_hosts: cfg.ecowitt.manual_hosts.clone(),
+        listen_port: cfg.ecowitt.listen_port,
+        cache_path: cache_path.clone(),
+    };
+    let mgmt = mgmt.with_streaming_action(plugin_sdk_rs::StreamingAction::new(
+        "set_custom_server",
+        move |ctx, params| {
+            let h = stream_handle.clone();
+            async move { set_custom_server_streaming(ctx, params, h).await }
+        },
+    ));
 
     // Publish active status.
     if let Err(e) = client.publish_plugin_status("active").await {
@@ -488,13 +493,13 @@ fn capabilities_manifest(listen_port: u16) -> hc_types::Capabilities {
                     "server_used": { "type": "string" },
                     "port_used": { "type": "integer" },
                 })),
-                stream: false,
+                stream: true,
                 cancelable: false,
-                concurrency: Concurrency::default(),
+                concurrency: Concurrency::Single,
                 item_key: None,
                 item_operations: None,
                 requires_role: RequiresRole::Admin,
-                timeout_ms: None,
+                timeout_ms: Some(60_000),
             },
             Action {
                 id: "reboot_gateway".into(),
@@ -529,7 +534,6 @@ async fn run_action(
     cmd: &serde_json::Value,
     gateway_cache: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     manual_hosts: &[String],
-    listen_port: u16,
     cache_path: &std::path::Path,
 ) -> Option<serde_json::Value> {
     use serde_json::json;
@@ -633,7 +637,10 @@ async fn run_action(
             simple_get(&ip, "/get_iotdevice_list?", "iot_devices").await
         }
         "get_custom_server" => simple_get(&ip, "/get_customserver?", "custom_server").await,
-        "set_custom_server" => set_custom_server(&ip, cmd, listen_port).await,
+        // set_custom_server is registered as a streaming action below
+        // (with_streaming_action) — it can blow past the 5s management
+        // RPC timeout when auto-detect + POST + GET-fallback stack up,
+        // so it lives outside this sync custom_handler dispatch.
         "reboot_gateway" => {
             // Different firmware revs expose reboot at different paths.
             // Try the most common ones in order; first 200 wins.
@@ -806,92 +813,141 @@ async fn simple_get(
     }
 }
 
-/// `set_custom_server` posts the gateway's upload destination via
-/// `/set_customserver`. Firmware revisions vary in the parameter
-/// names they accept — the modern alias names (server / port / path)
-/// were standardised around GW2000 firmware ~3.x. We send both the
-/// modern names AND legacy aliases (ip / pport / cf_path / etc.) so
-/// the same request works across revs without conditional logic.
-///
-/// Returns the raw response body so the caller can spot firmware
-/// quirks; status code 200 isn't a guarantee the change took effect
-/// — recommend pairing with `get_custom_server` afterwards.
-async fn set_custom_server(
-    ip: &str,
-    cmd: &serde_json::Value,
+/// Bundle of long-lived state the streaming `set_custom_server`
+/// action closure needs. Cloneable so the SDK can wrap it into the
+/// per-invocation handler closure.
+#[derive(Clone)]
+struct StreamHandle {
+    gateway_cache: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    manual_hosts: Vec<String>,
     listen_port: u16,
-) -> Option<serde_json::Value> {
+    cache_path: std::path::PathBuf,
+}
+
+/// Streaming `set_custom_server`. Same protocol as the old sync
+/// version (POST /set_customserver with both modern + legacy
+/// aliases populated; GET-with-query-string fallback if POST is
+/// rejected). Wrapped in stage events so the operator can see what
+/// the action is doing — and so the work can comfortably exceed
+/// core's 5s sync RPC timeout.
+async fn set_custom_server_streaming(
+    ctx: plugin_sdk_rs::StreamContext,
+    params: serde_json::Value,
+    handle: StreamHandle,
+) -> anyhow::Result<()> {
     use serde_json::json;
-    // Resolve `server`: explicit override, otherwise auto-detect by
-    // opening a TCP connection to the gateway and reading our local
-    // socket address. That's the IP the gateway can reach the plugin
-    // at — correct even when the plugin is on a different host than
-    // homeCore core, or has multiple NICs.
-    let server_override = cmd
+
+    ctx.progress(Some(0), Some("starting"), Some("Resolving gateway IP"))
+        .await?;
+    let ip = match resolve_gateway_ip(
+        &params,
+        &handle.gateway_cache,
+        &handle.manual_hosts,
+        &handle.cache_path,
+    )
+    .await
+    {
+        Ok(ip) => ip,
+        Err(msg) => return ctx.error(msg).await,
+    };
+    ctx.progress(
+        Some(25),
+        Some("resolved"),
+        Some(&format!("Gateway: {ip}")),
+    )
+    .await?;
+
+    // Resolve `server` (auto-detect when blank) and `port` (default
+    // to listen_port). Same logic as the prior sync version, just
+    // with progress events sprinkled in.
+    let server_override = params
         .get("server")
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     let server = match server_override {
-        Some(s) => s,
-        None => match detect_local_ip_to(ip).await {
-            Ok(local) => local,
-            Err(e) => {
-                return Some(json!({
-                    "status": "error",
-                    "error": format!(
-                        "set_custom_server: server auto-detect failed ({e}); \
-                         pass an explicit `server` param"
-                    ),
-                }));
+        Some(s) => {
+            ctx.progress(
+                Some(45),
+                Some("server-override"),
+                Some(&format!("Using explicit server={s}")),
+            )
+            .await?;
+            s
+        }
+        None => {
+            ctx.progress(
+                Some(35),
+                Some("detecting"),
+                Some(&format!(
+                    "Detecting plugin's IP from gateway {ip}'s perspective"
+                )),
+            )
+            .await?;
+            match detect_local_ip_to(&ip).await {
+                Ok(local) => {
+                    ctx.progress(
+                        Some(55),
+                        Some("detected"),
+                        Some(&format!("Detected server={local}")),
+                    )
+                    .await?;
+                    local
+                }
+                Err(e) => {
+                    return ctx
+                        .error(format!(
+                            "server auto-detect failed ({e}); pass an explicit `server` param"
+                        ))
+                        .await;
+                }
             }
-        },
+        }
     };
-    // `port` defaults to the plugin's configured listen_port. The
-    // manifest's schema already pre-fills the form with this value;
-    // this branch is for callers that didn't go through the form.
-    let port = cmd
+
+    let port = params
         .get("port")
         .and_then(|v| v.as_u64())
         .filter(|p| *p > 0)
-        .unwrap_or(listen_port as u64);
-    let path = cmd
+        .unwrap_or(handle.listen_port as u64);
+    let path = params
         .get("path")
         .and_then(|v| v.as_str())
         .unwrap_or("/data/report/");
-    let interval = cmd
+    let interval = params
         .get("interval_secs")
         .and_then(|v| v.as_u64())
         .unwrap_or(60);
-    let protocol = cmd
+    let protocol = params
         .get("protocol")
         .and_then(|v| v.as_str())
         .unwrap_or("ecowitt");
-    let enable = cmd
+    let enable = params
         .get("enable")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
-    let username = cmd.get("username").and_then(|v| v.as_str()).unwrap_or("");
-    let password = cmd.get("password").and_then(|v| v.as_str()).unwrap_or("");
+    let username = params
+        .get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let password = params
+        .get("password")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
-    // Map protocol string to gateway's numeric type. Newer firmware
-    // also accepts the string directly; sending both covers the gap.
     let proto_num = match protocol {
         "wunderground" | "wu" => "1",
-        _ => "0", // ecowitt / customized
+        _ => "0",
     };
     let enable_str = if enable { "1" } else { "0" };
 
-    // Build the payload with every alias we've seen, so the firmware
-    // can pick whichever names it expects. Extra fields are ignored
-    // by every firmware we've checked.
     let mut form: Vec<(&str, String)> = vec![
         ("type", proto_num.to_string()),
         ("protocol", protocol.to_string()),
-        ("server", server.to_string()),
-        ("ip", server.to_string()),
-        ("address", server.to_string()),
+        ("server", server.clone()),
+        ("ip", server.clone()),
+        ("address", server.clone()),
         ("port", port.to_string()),
         ("pport", port.to_string()),
         ("path", path.to_string()),
@@ -911,45 +967,62 @@ async fn set_custom_server(
         form.push(("station_pw", password.to_string()));
     }
 
+    ctx.progress(
+        Some(70),
+        Some("posting"),
+        Some(&format!("POST /set_customserver to {ip}")),
+    )
+    .await?;
+
     let url = format!("http://{ip}/set_customserver?");
-    match http_post_form(&url, &form).await {
-        Ok(body) => Some(json!({
-            "status": "ok",
-            "host": ip,
-            "endpoint": url,
-            "server_used": server,
-            "port_used": port,
-            "raw_response": body,
-        })),
+    let (endpoint_used, raw_response, fallback_note) = match http_post_form(&url, &form).await {
+        Ok(body) => (url.clone(), body, None),
         Err(e) => {
-            // Some firmware accepts the same params via GET query
-            // string instead of form-POST. Fall back once.
+            ctx.progress(
+                Some(80),
+                Some("post-failed"),
+                Some(&format!(
+                    "POST rejected ({e}); falling back to GET query"
+                )),
+            )
+            .await?;
             let qs: String = form
                 .iter()
-                .map(|(k, v)| {
-                    format!("{}={}", k, urlencoding(v))
-                })
+                .map(|(k, v)| format!("{}={}", k, urlencoding(v)))
                 .collect::<Vec<_>>()
                 .join("&");
             let get_url = format!("{url}{qs}");
             match http_get_text(&get_url).await {
-                Ok(body) => Some(json!({
-                    "status": "ok",
-                    "host": ip,
-                    "endpoint": get_url,
-                    "server_used": server,
-                    "port_used": port,
-                    "raw_response": body,
-                    "note": "firmware required GET form fallback",
-                })),
-                Err(e2) => Some(json!({
-                    "status": "error",
-                    "host": ip,
-                    "error": format!("set_customserver: POST failed ({e}); GET fallback also failed ({e2})"),
-                })),
+                Ok(body) => (
+                    get_url,
+                    body,
+                    Some("firmware required GET form fallback".to_string()),
+                ),
+                Err(e2) => {
+                    return ctx
+                        .error(format!(
+                            "set_customserver: POST failed ({e}); GET fallback also failed ({e2})"
+                        ))
+                        .await;
+                }
             }
         }
+    };
+
+    ctx.progress(Some(100), Some("done"), Some("Upload destination updated"))
+        .await?;
+
+    let mut result = json!({
+        "host": ip,
+        "endpoint": endpoint_used,
+        "server_used": server,
+        "port_used": port,
+        "raw_response": raw_response,
+    });
+    if let Some(note) = fallback_note {
+        result["note"] = json!(note);
     }
+    ctx.complete(result).await
 }
 
 /// Detect the local IP the plugin's host uses to reach `gateway`.
