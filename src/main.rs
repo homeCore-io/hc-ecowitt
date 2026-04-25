@@ -133,6 +133,10 @@ async fn try_start(
     // dispatcher probes these via HTTP /get_device_info to reach
     // consoles on VLANs UDP broadcast can't traverse.
     let manual_hosts = cfg.ecowitt.manual_hosts.clone();
+    // Gateway web-UI password, captured once. Used for the /set_*
+    // cgi-bin endpoints on firmware revisions that gate writes
+    // behind the local web-UI login (e.g., GW1100 with a password).
+    let gateway_password = cfg.ecowitt.gateway_password.clone();
 
     // Enable management protocol + capability manifest.
     let mgmt = client
@@ -150,6 +154,7 @@ async fn try_start(
             let gateway = std::sync::Arc::clone(&gateway_for_mgmt);
             let manual = manual_hosts.clone();
             let cache_path = cache_path_for_handler.clone();
+            let password = gateway_password.clone();
             let action_for_err = action.clone();
             // Bridge the SDK's sync custom_handler signature to async
             // work via a one-shot tokio runtime (same pattern as
@@ -160,7 +165,7 @@ async fn try_start(
                     .build()
                     .ok()?;
                 rt.block_on(async move {
-                    run_action(&action, &cmd_owned, gateway, &manual, &cache_path).await
+                    run_action(&action, &cmd_owned, gateway, &manual, &cache_path, &password).await
                 })
             })
             .join()
@@ -181,6 +186,7 @@ async fn try_start(
         manual_hosts: cfg.ecowitt.manual_hosts.clone(),
         listen_port: cfg.ecowitt.listen_port,
         cache_path: cache_path.clone(),
+        gateway_password: cfg.ecowitt.gateway_password.clone(),
     };
     let mgmt = mgmt.with_streaming_action(plugin_sdk_rs::StreamingAction::new(
         "set_custom_server",
@@ -535,6 +541,7 @@ async fn run_action(
     gateway_cache: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     manual_hosts: &[String],
     cache_path: &std::path::Path,
+    gateway_password: &str,
 ) -> Option<serde_json::Value> {
     use serde_json::json;
     use std::time::Duration;
@@ -636,7 +643,23 @@ async fn run_action(
         "refresh_iot_devices" => {
             simple_get(&ip, "/get_iotdevice_list?", "iot_devices").await
         }
-        "get_custom_server" => simple_get(&ip, "/get_customserver?", "custom_server").await,
+        "get_custom_server" => match fetch_custom_server(&ip, gateway_password).await {
+            Ok((dialect, normalized, raw)) => Some(json!({
+                "status": "ok",
+                "host": ip,
+                "dialect": match dialect {
+                    GwDialect::Modern => "customserver",
+                    GwDialect::Ws => "ws_settings",
+                },
+                "custom_server": normalized,
+                "raw": raw,
+            })),
+            Err(e) => Some(json!({
+                "status": "error",
+                "host": ip,
+                "error": format!("get_custom_server: {e}"),
+            })),
+        },
         // set_custom_server is registered as a streaming action below
         // (with_streaming_action) — it can blow past the 5s management
         // RPC timeout when auto-detect + POST + GET-fallback stack up,
@@ -822,6 +845,10 @@ struct StreamHandle {
     manual_hosts: Vec<String>,
     listen_port: u16,
     cache_path: std::path::PathBuf,
+    /// Password for the gateway's local web UI. Empty when no
+    /// password is configured. Used to authenticate before privileged
+    /// `/set_*` endpoints on firmware revisions that require it.
+    gateway_password: String,
 }
 
 /// Streaming `set_custom_server`. Same protocol as the old sync
@@ -927,101 +954,86 @@ async fn set_custom_server_streaming(
         .get("enable")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
-    let username = params
+    // Per-protocol creds (e.g., Wunderground station ID + key). NOT
+    // the gateway's web-UI password — that lives on `handle`.
+    let creds_user = params
         .get("username")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let password = params
+    let creds_pwd = params
         .get("password")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let proto_num = match protocol {
-        "wunderground" | "wu" => "1",
-        _ => "0",
+    // Probe the gateway to learn which dialect it speaks
+    // (`/get_customserver` for GW2000, `/get_ws_settings` for GW1100).
+    // Same call validates connectivity + auth before we attempt the
+    // write.
+    ctx.progress(
+        Some(60),
+        Some("probing"),
+        Some("Probing gateway dialect (GW2000 vs GW1100)"),
+    )
+    .await?;
+    let dialect = match fetch_custom_server(&ip, &handle.gateway_password).await {
+        Ok((d, _, _)) => d,
+        Err(e) => {
+            return ctx
+                .error(format!(
+                    "Could not read current customserver settings ({e}). \
+                    Check gateway IP and (if a password is set) [ecowitt].gateway_password."
+                ))
+                .await;
+        }
     };
-    let enable_str = if enable { "1" } else { "0" };
-
-    let mut form: Vec<(&str, String)> = vec![
-        ("type", proto_num.to_string()),
-        ("protocol", protocol.to_string()),
-        ("server", server.clone()),
-        ("ip", server.clone()),
-        ("address", server.clone()),
-        ("port", port.to_string()),
-        ("pport", port.to_string()),
-        ("path", path.to_string()),
-        ("cf_path", path.to_string()),
-        ("interval", interval.to_string()),
-        ("intvl", interval.to_string()),
-        ("uptime", interval.to_string()),
-        ("enable", enable_str.into()),
-        ("ena", enable_str.into()),
-    ];
-    if !username.is_empty() {
-        form.push(("usr", username.to_string()));
-        form.push(("station_id", username.to_string()));
-    }
-    if !password.is_empty() {
-        form.push(("pwd", password.to_string()));
-        form.push(("station_pw", password.to_string()));
-    }
-
+    let dialect_label = match dialect {
+        GwDialect::Modern => "GW2000-style (/set_customserver)",
+        GwDialect::Ws => "GW1100-style (/set_ws_settings)",
+    };
     ctx.progress(
         Some(70),
         Some("posting"),
-        Some(&format!("POST /set_customserver to {ip}")),
+        Some(&format!("Writing settings via {dialect_label}")),
     )
     .await?;
 
-    let url = format!("http://{ip}/set_customserver?");
-    let (endpoint_used, raw_response, fallback_note) = match http_post_form(&url, &form).await {
-        Ok(body) => (url.clone(), body, None),
+    let (endpoint_used, raw_response) = match push_custom_server(
+        &ip,
+        &handle.gateway_password,
+        dialect,
+        &server,
+        port,
+        path,
+        interval,
+        protocol,
+        enable,
+        creds_user,
+        creds_pwd,
+    )
+    .await
+    {
+        Ok(pair) => pair,
         Err(e) => {
-            ctx.progress(
-                Some(80),
-                Some("post-failed"),
-                Some(&format!(
-                    "POST rejected ({e}); falling back to GET query"
-                )),
-            )
-            .await?;
-            let qs: String = form
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, urlencoding(v)))
-                .collect::<Vec<_>>()
-                .join("&");
-            let get_url = format!("{url}{qs}");
-            match http_get_text(&get_url).await {
-                Ok(body) => (
-                    get_url,
-                    body,
-                    Some("firmware required GET form fallback".to_string()),
-                ),
-                Err(e2) => {
-                    return ctx
-                        .error(format!(
-                            "set_customserver: POST failed ({e}); GET fallback also failed ({e2})"
-                        ))
-                        .await;
-                }
-            }
+            return ctx
+                .error(format!("set customserver failed: {e}"))
+                .await;
         }
     };
 
     ctx.progress(Some(100), Some("done"), Some("Upload destination updated"))
         .await?;
 
-    let mut result = json!({
+    let result = json!({
         "host": ip,
         "endpoint": endpoint_used,
+        "dialect": match dialect {
+            GwDialect::Modern => "customserver",
+            GwDialect::Ws => "ws_settings",
+        },
         "server_used": server,
         "port_used": port,
         "raw_response": raw_response,
     });
-    if let Some(note) = fallback_note {
-        result["note"] = json!(note);
-    }
     ctx.complete(result).await
 }
 
@@ -1116,4 +1128,266 @@ async fn http_get_text(url: &str) -> anyhow::Result<String> {
         anyhow::bail!("status {}", resp.status());
     }
     Ok(resp.text().await.unwrap_or_default())
+}
+
+async fn http_post_json(url: &str, body: &serde_json::Value) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()?;
+    let resp = client.post(url).json(body).send().await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("status {status}: {body}");
+    }
+    Ok(resp.text().await.unwrap_or_default())
+}
+
+/// Standard base64 encode (RFC 4648, no padding-stripping). Inline
+/// to avoid a separate dependency — only used by the GW1100 login
+/// flow which sends `{"pwd":"<base64(password)>"}`. Empty input
+/// yields empty output, matching the JS `baseCode("")` behavior.
+fn base64_encode(input: &[u8]) -> String {
+    const CHARS: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    let mut i = 0;
+    while i + 3 <= input.len() {
+        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | (input[i + 2] as u32);
+        out.push(CHARS[((n >> 18) & 63) as usize] as char);
+        out.push(CHARS[((n >> 12) & 63) as usize] as char);
+        out.push(CHARS[((n >> 6) & 63) as usize] as char);
+        out.push(CHARS[(n & 63) as usize] as char);
+        i += 3;
+    }
+    let rem = input.len() - i;
+    if rem == 1 {
+        let n = (input[i] as u32) << 16;
+        out.push(CHARS[((n >> 18) & 63) as usize] as char);
+        out.push(CHARS[((n >> 12) & 63) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rem == 2 {
+        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
+        out.push(CHARS[((n >> 18) & 63) as usize] as char);
+        out.push(CHARS[((n >> 12) & 63) as usize] as char);
+        out.push(CHARS[((n >> 6) & 63) as usize] as char);
+        out.push('=');
+    }
+    out
+}
+
+/// Authenticate to the gateway's web UI. POSTs JSON
+/// `{"pwd":"<base64(password)>"}` to `/set_login_info` — the same
+/// handshake the gateway's own browser UI uses (see `axjs.js` →
+/// `baseCode()`). Returns Ok on `status=="1"` in the response body.
+///
+/// Auth state is server-side, keyed by source IP/socket — the
+/// gateway issues no Set-Cookie and there's no token to track.
+/// Subsequent privileged calls just need to come from the same
+/// client within the gateway's session lifetime (firmware-defined,
+/// typically ~5 minutes).
+async fn gw_login(ip: &str, password: &str) -> anyhow::Result<()> {
+    let url = format!("http://{ip}/set_login_info");
+    let body = serde_json::json!({
+        "pwd": base64_encode(password.as_bytes()),
+    });
+    let raw = http_post_json(&url, &body).await?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("login response not JSON: {e}; body={raw}"))?;
+    let status = parsed
+        .get("status")
+        .and_then(|v| v.as_str().map(str::to_string).or_else(|| v.as_u64().map(|n| n.to_string())))
+        .unwrap_or_default();
+    if status == "1" {
+        Ok(())
+    } else {
+        let msg = parsed
+            .get("msg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("login rejected");
+        anyhow::bail!("{msg} (status={status})")
+    }
+}
+
+/// Fetch the gateway's customserver settings, transparently handling
+/// firmware-revision differences.
+///
+/// Tries `/get_customserver` (GW2000-style) first; on failure (404 or
+/// non-success status) falls back to `/get_ws_settings` (GW1100-style)
+/// and normalizes its schema into the common shape. If either call
+/// returns a hard auth-style error (401/403) and a password is
+/// configured, performs `gw_login` and retries once.
+///
+/// Returns a `(dialect, normalized_json, raw_json)` triple so callers
+/// can pick the right `set_*` endpoint and present the raw response
+/// to operators if needed.
+async fn fetch_custom_server(
+    ip: &str,
+    password: &str,
+) -> anyhow::Result<(GwDialect, serde_json::Value, serde_json::Value)> {
+    // GW2000 modern path.
+    let modern_url = format!("http://{ip}/get_customserver?");
+    if let Ok(v) = http_get_json(&modern_url).await {
+        return Ok((GwDialect::Modern, v.clone(), v));
+    }
+    // GW1100 path. Try once, login if needed, retry once.
+    let legacy_url = format!("http://{ip}/get_ws_settings");
+    let raw = match http_get_json(&legacy_url).await {
+        Ok(v) => v,
+        Err(_) if !password.is_empty() => {
+            gw_login(ip, password).await?;
+            http_get_json(&legacy_url).await?
+        }
+        Err(e) => anyhow::bail!("neither /get_customserver nor /get_ws_settings responded: {e}"),
+    };
+    let normalized = normalize_ws_settings(&raw);
+    Ok((GwDialect::Ws, normalized, raw))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GwDialect {
+    Modern,
+    Ws,
+}
+
+/// Translate GW1100 `/get_ws_settings` output into the same shape
+/// the GW2000 `/get_customserver` returns, so UI consumers see one
+/// schema regardless of firmware. Fields not present in the source
+/// are simply omitted.
+fn normalize_ws_settings(raw: &serde_json::Value) -> serde_json::Value {
+    use serde_json::json;
+    let proto = raw
+        .get("Protocol")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ecowitt");
+    let enabled = raw
+        .get("Customized")
+        .and_then(|v| v.as_str())
+        .map(|s| s.eq_ignore_ascii_case("enable"))
+        .unwrap_or(false);
+    let (server, path, port, interval) = if proto.eq_ignore_ascii_case("wunderground") {
+        (
+            raw.get("usr_wu_id").and_then(|v| v.as_str()).unwrap_or(""),
+            raw.get("usr_wu_path").and_then(|v| v.as_str()).unwrap_or(""),
+            raw.get("usr_wu_port").and_then(|v| v.as_str()).unwrap_or(""),
+            raw.get("usr_wu_upload").and_then(|v| v.as_str()).unwrap_or(""),
+        )
+    } else {
+        (
+            raw.get("ecowitt_ip").and_then(|v| v.as_str()).unwrap_or(""),
+            raw.get("ecowitt_path").and_then(|v| v.as_str()).unwrap_or(""),
+            raw.get("ecowitt_port").and_then(|v| v.as_str()).unwrap_or(""),
+            raw.get("ecowitt_upload").and_then(|v| v.as_str()).unwrap_or(""),
+        )
+    };
+    json!({
+        "protocol": proto,
+        "enable": enabled,
+        "server": server,
+        "path": path,
+        "port": port,
+        "interval": interval,
+    })
+}
+
+/// Push customserver settings to the gateway. Picks `/set_customserver`
+/// (GW2000 form-encoded with both modern + legacy field aliases) or
+/// `/set_ws_settings` (GW1100 JSON body) based on the dialect detected
+/// by `fetch_custom_server`. Logs in first when a password is set.
+///
+/// Returns the endpoint used and raw response body.
+#[allow(clippy::too_many_arguments)]
+async fn push_custom_server(
+    ip: &str,
+    password: &str,
+    dialect: GwDialect,
+    server: &str,
+    port: u64,
+    path: &str,
+    interval: u64,
+    protocol: &str,
+    enable: bool,
+    creds_user: &str,
+    creds_pwd: &str,
+) -> anyhow::Result<(String, String)> {
+    if !password.is_empty() {
+        let _ = gw_login(ip, password).await;
+    }
+    match dialect {
+        GwDialect::Modern => {
+            let proto_num = match protocol {
+                "wunderground" | "wu" => "1",
+                _ => "0",
+            };
+            let enable_str = if enable { "1" } else { "0" };
+            let mut form: Vec<(&str, String)> = vec![
+                ("type", proto_num.to_string()),
+                ("protocol", protocol.to_string()),
+                ("server", server.to_string()),
+                ("ip", server.to_string()),
+                ("address", server.to_string()),
+                ("port", port.to_string()),
+                ("pport", port.to_string()),
+                ("path", path.to_string()),
+                ("cf_path", path.to_string()),
+                ("interval", interval.to_string()),
+                ("intvl", interval.to_string()),
+                ("uptime", interval.to_string()),
+                ("enable", enable_str.into()),
+                ("ena", enable_str.into()),
+            ];
+            if !creds_user.is_empty() {
+                form.push(("usr", creds_user.to_string()));
+                form.push(("station_id", creds_user.to_string()));
+            }
+            if !creds_pwd.is_empty() {
+                form.push(("pwd", creds_pwd.to_string()));
+                form.push(("station_pw", creds_pwd.to_string()));
+            }
+            let url = format!("http://{ip}/set_customserver?");
+            match http_post_form(&url, &form).await {
+                Ok(body) => Ok((url, body)),
+                Err(e) => {
+                    // GW2000 GET-with-query-string fallback.
+                    let qs: String = form
+                        .iter()
+                        .map(|(k, v)| format!("{}={}", k, urlencoding(v)))
+                        .collect::<Vec<_>>()
+                        .join("&");
+                    let get_url = format!("{url}{qs}");
+                    let body = http_get_text(&get_url)
+                        .await
+                        .map_err(|e2| anyhow::anyhow!(
+                            "/set_customserver POST failed ({e}); GET fallback failed ({e2})"
+                        ))?;
+                    Ok((get_url, body))
+                }
+            }
+        }
+        GwDialect::Ws => {
+            let body = if protocol.eq_ignore_ascii_case("wunderground") {
+                serde_json::json!({
+                    "Customized": if enable { "enable" } else { "disable" },
+                    "Protocol": "wunderground",
+                    "usr_wu_id": server,
+                    "usr_wu_path": path,
+                    "usr_wu_port": port.to_string(),
+                    "usr_wu_upload": interval.to_string(),
+                })
+            } else {
+                serde_json::json!({
+                    "Customized": if enable { "enable" } else { "disable" },
+                    "Protocol": "ecowitt",
+                    "ecowitt_ip": server,
+                    "ecowitt_path": path,
+                    "ecowitt_port": port.to_string(),
+                    "ecowitt_upload": interval.to_string(),
+                })
+            };
+            let url = format!("http://{ip}/set_ws_settings");
+            let raw = http_post_json(&url, &body).await?;
+            Ok((url, raw))
+        }
+    }
 }

@@ -42,6 +42,16 @@ listen_port = 8888
 # Prefix for HomeCore device IDs (e.g., "ecowitt_weather", "ecowitt_temp_1")
 # device_prefix = "ecowitt"
 
+# Optional: gateway local web-UI credentials. Required for the
+# `set_custom_server` action on firmware revisions that gate writes
+# behind the login (e.g., GW1100 with a password configured). Leave
+# `gateway_password` blank if no password is set on the gateway.
+# Username defaults to "admin" — most firmware ignores this field
+# (the gateway hard-codes "admin") but it's exposed for forward
+# compatibility.
+# gateway_username = "admin"
+# gateway_password = ""
+
 # The plugin persists its successfully-resolved gateway IP into
 # `.cached-gateway-ip` next to this config file, so a once-discovered
 # console survives plugin restarts. Delete the file to force a

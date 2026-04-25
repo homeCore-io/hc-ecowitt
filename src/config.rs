@@ -63,6 +63,19 @@ pub struct EcowittConfig {
     /// Prefix for HomeCore device IDs (default: "ecowitt").
     #[serde(default = "default_device_prefix")]
     pub device_prefix: String,
+    /// Username for the gateway's local web UI. Most Ecowitt firmware
+    /// hard-codes this to "admin" and only checks the password — kept
+    /// here for forward-compatibility and so the field is visible in
+    /// config for installations that need to override it.
+    #[allow(dead_code)]
+    #[serde(default = "default_gateway_username")]
+    pub gateway_username: String,
+    /// Password for the gateway's local web UI. Leave blank if the
+    /// gateway has no password set. Required for `set_*` cgi-bin
+    /// endpoints on firmware revisions that gate writes behind the
+    /// web-UI login (e.g., GW1100 with a password configured).
+    #[serde(default)]
+    pub gateway_password: String,
 }
 
 fn default_listen_port() -> u16 {
@@ -73,4 +86,7 @@ fn default_poll_interval() -> u64 {
 }
 fn default_device_prefix() -> String {
     "ecowitt".into()
+}
+fn default_gateway_username() -> String {
+    "admin".into()
 }
