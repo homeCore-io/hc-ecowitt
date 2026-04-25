@@ -115,6 +115,10 @@ async fn try_start(
     let gateway_ip: std::sync::Arc<std::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(cfg.ecowitt.gateway_ip.clone()));
     let gateway_for_mgmt = std::sync::Arc::clone(&gateway_ip);
+    // Static manual_hosts list, captured once at startup. The
+    // dispatcher probes these via HTTP /get_device_info to reach
+    // consoles on VLANs UDP broadcast can't traverse.
+    let manual_hosts = cfg.ecowitt.manual_hosts.clone();
 
     // Enable management protocol + capability manifest.
     let mgmt = client
@@ -130,6 +134,7 @@ async fn try_start(
             let action = cmd["action"].as_str()?.to_string();
             let cmd_owned = cmd.clone();
             let gateway = std::sync::Arc::clone(&gateway_for_mgmt);
+            let manual = manual_hosts.clone();
             let action_for_err = action.clone();
             // Bridge the SDK's sync custom_handler signature to async
             // work via a one-shot tokio runtime (same pattern as
@@ -139,7 +144,9 @@ async fn try_start(
                     .enable_all()
                     .build()
                     .ok()?;
-                rt.block_on(async move { run_action(&action, &cmd_owned, gateway).await })
+                rt.block_on(async move {
+                    run_action(&action, &cmd_owned, gateway, &manual).await
+                })
             })
             .join()
             .ok()
@@ -478,54 +485,77 @@ fn capabilities_manifest() -> hc_types::Capabilities {
 }
 
 /// Manifest action dispatcher. Reads the optional `host` param off
-/// `cmd`, falls back to the cached gateway IP, then to UDP discovery.
-/// Returns `None` for unknown actions so the SDK falls through.
+/// `cmd`, falls back to the cached gateway IP, then to manual_hosts
+/// HTTP probes, then UDP discovery. Returns `None` for unknown
+/// actions so the SDK falls through.
 async fn run_action(
     action: &str,
     cmd: &serde_json::Value,
     gateway_cache: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    manual_hosts: &[String],
 ) -> Option<serde_json::Value> {
     use serde_json::json;
     use std::time::Duration;
 
     if action == "discover_gateways" {
-        return Some(match udp_discovery::discover_gateways(Duration::from_secs(3)).await {
-            Ok(found) => {
-                // Update the cache with the first responder so
-                // subsequent actions can target it without specifying
-                // a host.
-                let selected = found
-                    .first()
-                    .and_then(|v| v.get("ip").and_then(|s| s.as_str()).map(str::to_string))
-                    .or_else(|| {
-                        found
-                            .first()
-                            .and_then(|v| v.get("host").and_then(|s| s.as_str()).map(str::to_string))
-                    });
-                if let Some(ref ip) = selected {
-                    if let Ok(mut g) = gateway_cache.lock() {
-                        *g = Some(ip.clone());
-                    }
-                }
-                json!({
-                    "status": "ok",
-                    "discovered": found,
-                    "count": found.len(),
-                    "selected": selected,
-                })
+        // UDP broadcast first — picks up everything on the same
+        // broadcast domain.
+        let mut found = udp_discovery::discover_gateways(Duration::from_secs(3))
+            .await
+            .unwrap_or_default();
+
+        // Then HTTP-probe each manual_host. These are typically
+        // consoles on VLANs the broadcast can't reach. Add their
+        // /get_device_info responses to the result list, deduped by
+        // IP.
+        for host in manual_hosts {
+            if found.iter().any(|v| {
+                v.get("ip").and_then(|s| s.as_str()) == Some(host)
+                    || v.get("host").and_then(|s| s.as_str()) == Some(host)
+            }) {
+                continue;
             }
-            Err(e) => json!({
-                "status": "error",
-                "error": format!("UDP discovery failed: {e}"),
-            }),
-        });
+            let url = format!("http://{host}/get_device_info?");
+            match http_get_json(&url).await {
+                Ok(info) => found.push(json!({
+                    "host": host,
+                    "ip": host,
+                    "source": "manual_hosts",
+                    "info": info,
+                })),
+                Err(e) => {
+                    tracing::debug!(host, error = %e, "manual_hosts probe failed");
+                }
+            }
+        }
+
+        let selected = found
+            .first()
+            .and_then(|v| v.get("ip").and_then(|s| s.as_str()).map(str::to_string))
+            .or_else(|| {
+                found
+                    .first()
+                    .and_then(|v| v.get("host").and_then(|s| s.as_str()).map(str::to_string))
+            });
+        if let Some(ref ip) = selected {
+            if let Ok(mut g) = gateway_cache.lock() {
+                *g = Some(ip.clone());
+            }
+        }
+        return Some(json!({
+            "status": "ok",
+            "discovered": found,
+            "count": found.len(),
+            "selected": selected,
+        }));
     }
 
     // Every other action needs a gateway IP. Resolve in order:
     //   1. cmd["host"] override
     //   2. cached IP (from prior discovery or initial config)
-    //   3. UDP discovery (cache the result)
-    let ip = match resolve_gateway_ip(cmd, &gateway_cache).await {
+    //   3. configured manual_hosts (first that answers HTTP probe)
+    //   4. UDP discovery (cache the result)
+    let ip = match resolve_gateway_ip(cmd, &gateway_cache, manual_hosts).await {
         Ok(ip) => ip,
         Err(msg) => {
             return Some(json!({
@@ -599,11 +629,22 @@ async fn run_action(
     }
 }
 
-/// Resolve the gateway IP for an action: param override → cache → UDP
-/// discovery. On discovery success, the cache is updated.
+/// Resolve the gateway IP for an action. Order:
+///
+/// 1. `cmd["host"]` override.
+/// 2. Cached IP (set by a prior discover_gateways or any earlier
+///    fallback). Validated quickly: if the cached host doesn't answer
+///    /get_device_info we fall through to a fresh resolution.
+/// 3. Each configured `manual_hosts` entry, in order; first that
+///    responds to an HTTP probe wins. This is the path that handles
+///    VLAN-isolated consoles UDP broadcast can't reach.
+/// 4. UDP discovery — picks the first responder.
+///
+/// Caches the resolved IP for next time.
 async fn resolve_gateway_ip(
     cmd: &serde_json::Value,
     cache: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    manual_hosts: &[String],
 ) -> std::result::Result<String, String> {
     if let Some(host) = cmd.get("host").and_then(|v| v.as_str()) {
         let host = host.trim();
@@ -611,14 +652,27 @@ async fn resolve_gateway_ip(
             return Ok(host.to_string());
         }
     }
-    if let Ok(g) = cache.lock() {
-        if let Some(ref ip) = *g {
-            if !ip.is_empty() {
-                return Ok(ip.clone());
+    let cached = cache.lock().ok().and_then(|g| g.clone());
+    if let Some(ip) = cached.as_ref().filter(|s| !s.is_empty()) {
+        // Trust the cache without re-probing. If the gateway became
+        // unreachable, the action's own HTTP call will surface the
+        // error in its response and the user can pick another host.
+        return Ok(ip.clone());
+    }
+
+    // Manual hosts before UDP. They're explicitly configured by the
+    // operator, so prefer them — they're also faster (one HTTP call
+    // vs a 3s broadcast wait).
+    for host in manual_hosts {
+        let url = format!("http://{host}/get_device_info?");
+        if http_get_json(&url).await.is_ok() {
+            if let Ok(mut g) = cache.lock() {
+                *g = Some(host.clone());
             }
+            return Ok(host.clone());
         }
     }
-    // Last resort — broadcast and pick the first responder.
+
     let found =
         udp_discovery::discover_gateways(std::time::Duration::from_secs(3))
             .await
@@ -632,8 +686,10 @@ async fn resolve_gateway_ip(
                 .and_then(|v| v.get("host").and_then(|s| s.as_str()).map(str::to_string))
         })
         .ok_or_else(|| {
-            "no host param, no cached gateway, and UDP discovery returned no consoles. \
-             Set [ecowitt].gateway_ip in config.toml or pass `host` as an action param."
+            "no `host` param, no cached gateway, no manual_hosts responded, \
+             and UDP discovery returned no consoles. Set [ecowitt].gateway_ip \
+             or [ecowitt].manual_hosts in config.toml, or pass `host` as an \
+             action param."
                 .to_string()
         })?;
     if let Ok(mut g) = cache.lock() {

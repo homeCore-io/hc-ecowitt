@@ -46,6 +46,17 @@ pub struct EcowittConfig {
     pub listen_port: u16,
     /// Optional: gateway IP for polling mode.
     pub gateway_ip: Option<String>,
+    /// Static console IPs to probe via HTTP whenever discovery runs
+    /// (`discover_gateways`) or any action needs to resolve a gateway
+    /// IP without one explicitly given.
+    ///
+    /// Use this when consoles live on a VLAN the homeCore host can
+    /// route to but UDP broadcast (port 45000) can't reach. Each
+    /// listed host is queried via `/get_device_info?` — successful
+    /// responses are merged into the discovery results alongside any
+    /// UDP-discovered consoles.
+    #[serde(default)]
+    pub manual_hosts: Vec<String>,
     /// Polling interval in seconds (only used when gateway_ip is set).
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
