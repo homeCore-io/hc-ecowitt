@@ -51,20 +51,42 @@ pub async fn refresh(
     password: &str,
     state: &GatewayDeviceState,
 ) -> Result<()> {
-    // /get_device_info is the cheapest "is this even a gateway" probe
-    // and gives us the MAC we use to derive the hc_id. If this fails
-    // we abandon the cycle — the rest of the endpoints would just
-    // pile up errors against an unreachable host.
+    // /get_device_info is the cheapest "is this even a gateway" probe.
+    // GW2000 firmware embeds `sta_mac` here; GW1100 doesn't, so we
+    // fall back to `/get_network_info` which exposes `mac` on every
+    // firmware rev we've seen. If both fail we abandon the cycle —
+    // the rest of the endpoints would just pile up errors against
+    // an unreachable host.
     let device_info_url = format!("http://{ip}/get_device_info");
     let device_info = http_get_json(&device_info_url).await?;
+
+    // Probe network info upfront — both for MAC fallback and to reuse
+    // its fields below for the network.* attributes.
+    let network_url = format!("http://{ip}/get_network_info");
+    let network_info = http_get_json(&network_url).await.ok();
+
     let mac = device_info
         .get("sta_mac")
-        .or_else(|| device_info.get("mac"))
         .and_then(Value::as_str)
         .map(str::to_string)
+        .or_else(|| {
+            network_info
+                .as_ref()
+                .and_then(|v| v.get("mac"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            device_info
+                .get("mac")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .unwrap_or_default();
     if mac.is_empty() {
-        anyhow::bail!("/get_device_info returned no MAC; cannot key gateway device");
+        anyhow::bail!(
+            "no MAC in /get_device_info or /get_network_info; cannot key gateway device"
+        );
     }
     let hc_id = format!("{prefix}_gw_{}", normalize_mac(&mac));
 
@@ -143,11 +165,11 @@ pub async fn refresh(
         }
     }
 
-    // /get_network_info: WiFi station info. wifi_pwd is base64-encoded
-    // on this firmware and would leak the user's WiFi password into
-    // homeCore state — drop it. Everything else is safe to surface.
-    let network_url = format!("http://{ip}/get_network_info");
-    if let Ok(v) = http_get_json(&network_url).await {
+    // /get_network_info: WiFi station info (already fetched above for
+    // MAC fallback; reuse it). wifi_pwd is base64-encoded on this
+    // firmware and would leak the user's WiFi password into homeCore
+    // state — drop it. Everything else is safe to surface.
+    if let Some(v) = network_info.as_ref() {
         for (src, dst) in [
             ("ssid", "network.ssid"),
             ("wifi_ip", "network.ip"),
