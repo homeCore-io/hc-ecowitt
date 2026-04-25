@@ -1,5 +1,6 @@
 mod config;
 mod form_parser;
+mod gateway_device;
 mod id_map;
 mod logging;
 mod parser;
@@ -13,7 +14,7 @@ use plugin_sdk_rs::{PluginClient, PluginConfig};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 use config::Config;
 use registry::DeviceRegistry;
@@ -107,6 +108,9 @@ async fn try_start(
         &cfg.logging.log_forward_level,
     );
     let publisher = client.device_publisher();
+    // Cloneable handle for the gateway-device poller — needs to publish
+    // alongside the sensor registry from a separate task.
+    let gateway_publisher = publisher.clone();
 
     // Cached gateway IP for the management custom_handler.
     //
@@ -234,6 +238,67 @@ async fn try_start(
             poller::run_poller(ip, interval, state).await;
         });
         info!(gateway_ip = %gateway_ip, interval_secs = interval, "Gateway poller started");
+    }
+
+    // --- Start gateway-as-device poller ---
+    //
+    // Publishes the console's settings/info as attributes of a single
+    // virtual device per plugin instance. Uses the same gateway-IP
+    // resolution chain as the manifest actions (cached → configured
+    // → manual_hosts → UDP), so it works whether or not gateway_ip
+    // is statically configured.
+    //
+    // Cadence: every 300s. Settings change rarely; this is a polish
+    // surface, not a real-time data path. Trigger an immediate
+    // refresh by restarting the plugin or calling `set_custom_server`
+    // (which writes through `set_custom_server_streaming` — a future
+    // patch can have it nudge the poller).
+    {
+        let publisher = gateway_publisher;
+        let prefix = cfg.ecowitt.device_prefix.clone();
+        let plugin_id = cfg.homecore.plugin_id.clone();
+        let manual_hosts = cfg.ecowitt.manual_hosts.clone();
+        let configured_ip = cfg.ecowitt.gateway_ip.clone();
+        let cache_path = cache_path.clone();
+        let gateway_cache = std::sync::Arc::clone(&gateway_ip);
+        let password = cfg.ecowitt.gateway_password.clone();
+        let device_state = gateway_device::new_state();
+        tokio::spawn(async move {
+            // Brief grace period so the SDK loop is ready to accept
+            // publish() calls before the first refresh fires.
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                let ip = match resolve_gateway_for_poller(
+                    &gateway_cache,
+                    configured_ip.as_deref(),
+                    &manual_hosts,
+                    &cache_path,
+                )
+                .await
+                {
+                    Some(ip) => ip,
+                    None => {
+                        debug!("gateway-device poller: no gateway resolved yet");
+                        continue;
+                    }
+                };
+                if let Err(e) = gateway_device::refresh(
+                    &publisher,
+                    &prefix,
+                    &plugin_id,
+                    &ip,
+                    &password,
+                    &device_state,
+                )
+                .await
+                {
+                    warn!(error = %e, "gateway-device refresh failed");
+                }
+            }
+        });
+        info!("Gateway-device poller started (300s cadence)");
     }
 
     // --- Run HTTP POST receiver (blocks forever) ---
@@ -783,6 +848,35 @@ async fn resolve_gateway_ip(
     ))
 }
 
+/// Resolver for the gateway-device poller.
+///
+/// Same precedence as `resolve_gateway_ip` (cached → configured →
+/// manual_hosts) but **does not** fall back to UDP discovery — that's
+/// noisy to fire every 5 minutes from a background task. If nothing
+/// responds, returns None and the poller skips this cycle silently.
+async fn resolve_gateway_for_poller(
+    cache: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    configured: Option<&str>,
+    manual_hosts: &[String],
+    cache_path: &std::path::Path,
+) -> Option<String> {
+    if let Some(ip) = cache.lock().ok().and_then(|g| g.clone()).filter(|s| !s.is_empty()) {
+        return Some(ip);
+    }
+    if let Some(ip) = configured.filter(|s| !s.is_empty()) {
+        update_cache(cache, cache_path, ip);
+        return Some(ip.to_string());
+    }
+    for host in manual_hosts {
+        let url = format!("http://{host}/get_device_info?");
+        if http_get_json(&url).await.is_ok() {
+            update_cache(cache, cache_path, host);
+            return Some(host.clone());
+        }
+    }
+    None
+}
+
 /// Update the in-memory + on-disk cache of the resolved gateway IP.
 /// Disk writes are best-effort — we don't fail the action just
 /// because the cache file isn't writable.
@@ -1107,7 +1201,7 @@ async fn http_post_form(
     Ok(resp.text().await.unwrap_or_default())
 }
 
-async fn http_get_json(url: &str) -> anyhow::Result<serde_json::Value> {
+pub async fn http_get_json(url: &str) -> anyhow::Result<serde_json::Value> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()?;
@@ -1222,7 +1316,7 @@ async fn gw_login(ip: &str, password: &str) -> anyhow::Result<()> {
 /// Returns a `(dialect, normalized_json, raw_json)` triple so callers
 /// can pick the right `set_*` endpoint and present the raw response
 /// to operators if needed.
-async fn fetch_custom_server(
+pub async fn fetch_custom_server(
     ip: &str,
     password: &str,
 ) -> anyhow::Result<(GwDialect, serde_json::Value, serde_json::Value)> {
@@ -1246,7 +1340,7 @@ async fn fetch_custom_server(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GwDialect {
+pub enum GwDialect {
     Modern,
     Ws,
 }
