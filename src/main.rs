@@ -119,6 +119,10 @@ async fn try_start(
     // dispatcher probes these via HTTP /get_device_info to reach
     // consoles on VLANs UDP broadcast can't traverse.
     let manual_hosts = cfg.ecowitt.manual_hosts.clone();
+    // listen_port is the homeCore-side port consoles POST to. The
+    // `set_custom_server` action defaults its `port` field to this
+    // so the operator usually doesn't have to fill it in.
+    let listen_port_for_handler = cfg.ecowitt.listen_port;
 
     // Enable management protocol + capability manifest.
     let mgmt = client
@@ -129,12 +133,13 @@ async fn try_start(
             Some(log_level_handle),
         )
         .await?
-        .with_capabilities(capabilities_manifest())
+        .with_capabilities(capabilities_manifest(cfg.ecowitt.listen_port))
         .with_custom_handler(move |cmd| {
             let action = cmd["action"].as_str()?.to_string();
             let cmd_owned = cmd.clone();
             let gateway = std::sync::Arc::clone(&gateway_for_mgmt);
             let manual = manual_hosts.clone();
+            let listen_port = listen_port_for_handler;
             let action_for_err = action.clone();
             // Bridge the SDK's sync custom_handler signature to async
             // work via a one-shot tokio runtime (same pattern as
@@ -145,7 +150,7 @@ async fn try_start(
                     .build()
                     .ok()?;
                 rt.block_on(async move {
-                    run_action(&action, &cmd_owned, gateway, &manual).await
+                    run_action(&action, &cmd_owned, gateway, &manual, listen_port).await
                 })
             })
             .join()
@@ -211,7 +216,11 @@ async fn try_start(
 /// dispatcher uses the cached gateway from a previous discovery, the
 /// configured `gateway_ip`, or runs UDP discovery and picks the first
 /// responder — in that order.
-fn capabilities_manifest() -> hc_types::Capabilities {
+///
+/// `listen_port` is the homeCore-side port (`[ecowitt].listen_port`)
+/// the consoles POST to; baked into the `set_custom_server` action's
+/// `port` default so the form opens pre-populated.
+fn capabilities_manifest(listen_port: u16) -> hc_types::Capabilities {
     use hc_types::{Action, Capabilities, Concurrency, RequiresRole};
     use serde_json::json;
 
@@ -387,16 +396,19 @@ fn capabilities_manifest() -> hc_types::Capabilities {
                 id: "set_custom_server".into(),
                 label: "Set custom-server upload".into(),
                 description: Some(
-                    "Point the gateway's data uploads at a custom \
-                     server (typically homeCore's hc-ecowitt receiver). \
-                     Different firmware revisions accept slightly \
-                     different parameter names, so the request is sent \
-                     to `/set_customserver` with both modern and \
-                     legacy aliases populated. Verify by calling \
-                     `get_custom_server` afterwards. Required: server, \
-                     port. Optional: path (default `/data/report/`), \
-                     interval_secs (default 60), protocol (default \
-                     `ecowitt`), enable (default true)."
+                    "Point the gateway's data uploads at this hc-ecowitt \
+                     plugin's HTTP receiver. Both `server` and `port` \
+                     auto-default to the right values for a typical setup \
+                     — `port` is pre-filled with the plugin's configured \
+                     `[ecowitt].listen_port`, and `server` is auto-detected \
+                     at submit time by opening a TCP connection to the \
+                     gateway and reading the plugin's local socket IP (the \
+                     IP the gateway can reach the plugin at, regardless of \
+                     how many NICs the plugin's host has). Override either \
+                     by filling in the field. Different firmware revisions \
+                     accept different parameter names, so the request goes \
+                     out with both modern and legacy aliases populated. \
+                     Verify with `get_custom_server` afterwards."
                         .into(),
                 ),
                 params: Some(json!({
@@ -406,15 +418,14 @@ fn capabilities_manifest() -> hc_types::Capabilities {
                     },
                     "server": {
                         "type": "string",
-                        "required": true,
-                        "description": "Destination server IP/hostname (where homeCore's receiver listens)",
+                        "description": "Destination server IP. Leave blank to auto-detect the plugin's IP from the gateway's perspective (recommended).",
                     },
                     "port": {
                         "type": "integer",
-                        "required": true,
+                        "default": listen_port as i64,
                         "minimum": 1,
                         "maximum": 65535,
-                        "description": "Destination port (matches `[ecowitt].listen_port` in homeCore plugin config)",
+                        "description": "Destination port. Defaults to this plugin's configured listen_port.",
                     },
                     "path": {
                         "type": "string",
@@ -451,6 +462,8 @@ fn capabilities_manifest() -> hc_types::Capabilities {
                 result: Some(json!({
                     "endpoint": { "type": "string" },
                     "raw_response": { "type": "string" },
+                    "server_used": { "type": "string" },
+                    "port_used": { "type": "integer" },
                 })),
                 stream: false,
                 cancelable: false,
@@ -493,6 +506,7 @@ async fn run_action(
     cmd: &serde_json::Value,
     gateway_cache: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     manual_hosts: &[String],
+    listen_port: u16,
 ) -> Option<serde_json::Value> {
     use serde_json::json;
     use std::time::Duration;
@@ -596,7 +610,7 @@ async fn run_action(
             simple_get(&ip, "/get_iotdevice_list?", "iot_devices").await
         }
         "get_custom_server" => simple_get(&ip, "/get_customserver?", "custom_server").await,
-        "set_custom_server" => set_custom_server(&ip, cmd).await,
+        "set_custom_server" => set_custom_server(&ip, cmd, listen_port).await,
         "reboot_gateway" => {
             // Different firmware revs expose reboot at different paths.
             // Try the most common ones in order; first 200 wins.
@@ -734,16 +748,43 @@ async fn simple_get(
 async fn set_custom_server(
     ip: &str,
     cmd: &serde_json::Value,
+    listen_port: u16,
 ) -> Option<serde_json::Value> {
     use serde_json::json;
-    let server = cmd.get("server").and_then(|v| v.as_str()).unwrap_or("");
-    let port = cmd.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
-    if server.is_empty() || port == 0 {
-        return Some(json!({
-            "status": "error",
-            "error": "set_custom_server requires `server` (string) and `port` (integer) params",
-        }));
-    }
+    // Resolve `server`: explicit override, otherwise auto-detect by
+    // opening a TCP connection to the gateway and reading our local
+    // socket address. That's the IP the gateway can reach the plugin
+    // at — correct even when the plugin is on a different host than
+    // homeCore core, or has multiple NICs.
+    let server_override = cmd
+        .get("server")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let server = match server_override {
+        Some(s) => s,
+        None => match detect_local_ip_to(ip).await {
+            Ok(local) => local,
+            Err(e) => {
+                return Some(json!({
+                    "status": "error",
+                    "error": format!(
+                        "set_custom_server: server auto-detect failed ({e}); \
+                         pass an explicit `server` param"
+                    ),
+                }));
+            }
+        },
+    };
+    // `port` defaults to the plugin's configured listen_port. The
+    // manifest's schema already pre-fills the form with this value;
+    // this branch is for callers that didn't go through the form.
+    let port = cmd
+        .get("port")
+        .and_then(|v| v.as_u64())
+        .filter(|p| *p > 0)
+        .unwrap_or(listen_port as u64);
     let path = cmd
         .get("path")
         .and_then(|v| v.as_str())
@@ -805,6 +846,8 @@ async fn set_custom_server(
             "status": "ok",
             "host": ip,
             "endpoint": url,
+            "server_used": server,
+            "port_used": port,
             "raw_response": body,
         })),
         Err(e) => {
@@ -823,6 +866,8 @@ async fn set_custom_server(
                     "status": "ok",
                     "host": ip,
                     "endpoint": get_url,
+                    "server_used": server,
+                    "port_used": port,
                     "raw_response": body,
                     "note": "firmware required GET form fallback",
                 })),
@@ -834,6 +879,48 @@ async fn set_custom_server(
             }
         }
     }
+}
+
+/// Detect the local IP the plugin's host uses to reach `gateway`.
+///
+/// Open a quick TCP connection to the gateway's HTTP port and read
+/// our local socket address. The OS picks the route + source IP that
+/// will actually carry packets to that gateway, so the result is
+/// guaranteed to be the IP the gateway can post back to (matching
+/// any firewall, VLAN, or multi-NIC layout the plugin host happens
+/// to be on).
+///
+/// Tries port 80 first, falls back to 443 — every Ecowitt console we
+/// know about exposes its cgi-bin on plain HTTP, but if the host
+/// blocks 80 we still want a usable answer.
+async fn detect_local_ip_to(gateway: &str) -> anyhow::Result<String> {
+    use tokio::net::TcpStream;
+    let candidates = [80u16, 443];
+    let mut last_err: Option<String> = None;
+    for port in candidates {
+        let target = format!("{gateway}:{port}");
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            TcpStream::connect(&target),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => {
+                let local = stream.local_addr()?;
+                return Ok(local.ip().to_string());
+            }
+            Ok(Err(e)) => {
+                last_err = Some(format!("{target}: {e}"));
+            }
+            Err(_) => {
+                last_err = Some(format!("{target}: connect timed out"));
+            }
+        }
+    }
+    anyhow::bail!(
+        "could not connect to gateway on any candidate port: {}",
+        last_err.unwrap_or_else(|| "unknown".into())
+    )
 }
 
 fn urlencoding(s: &str) -> String {
