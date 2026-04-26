@@ -101,7 +101,16 @@ async fn try_start(
         password: cfg.homecore.password.clone(),
     };
 
-    let client = PluginClient::connect(sdk_config).await?;
+    let client = PluginClient::connect(sdk_config)
+        .await?
+        // SDK persistence so the tracked-device set survives restarts.
+        // Auto-reconcile is intentionally NOT wired up here — Ecowitt
+        // sensor cadence is irregular (battery-out sensors can be quiet
+        // for hours) and a periodic reconcile would risk wiping
+        // legit-but-quiet devices. Use `DELETE /plugins/:id/devices`
+        // to clean up zombies on demand; auto-register-on-first-sight
+        // recreates anything that's still live.
+        .with_device_persistence(published_ids_path(config_path));
     mqtt_log_handle.connect(
         client.mqtt_client(),
         &cfg.homecore.plugin_id,
@@ -1211,6 +1220,15 @@ pub async fn http_get_json(url: &str) -> anyhow::Result<serde_json::Value> {
     }
     let v: serde_json::Value = resp.json().await?;
     Ok(v)
+}
+
+/// Path of the cross-restart device-id snapshot, sibling to
+/// config.toml. Owned by the SDK device tracker.
+fn published_ids_path(config_path: &str) -> std::path::PathBuf {
+    std::path::Path::new(config_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(".published-device-ids.json")
 }
 
 async fn http_get_text(url: &str) -> anyhow::Result<String> {
