@@ -30,10 +30,10 @@ const CMD_BROADCAST: u8 = 0x12;
 /// Send a broadcast `CMD_BROADCAST` query and collect replies for
 /// `wait` seconds. Each reply maps to one gateway on the network.
 pub async fn discover_gateways(wait: Duration) -> Result<Vec<Value>> {
-    let socket = UdpSocket::bind("0.0.0.0:0").await.context("bind UDP socket")?;
-    socket
-        .set_broadcast(true)
-        .context("enable UDP broadcast")?;
+    let socket = UdpSocket::bind("0.0.0.0:0")
+        .await
+        .context("bind UDP socket")?;
+    socket.set_broadcast(true).context("enable UDP broadcast")?;
 
     // Build a CMD_BROADCAST query. Size includes the cmd byte, size
     // bytes, and checksum (= 5 bytes total for an empty payload), per

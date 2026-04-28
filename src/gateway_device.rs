@@ -84,9 +84,7 @@ pub async fn refresh(
         })
         .unwrap_or_default();
     if mac.is_empty() {
-        anyhow::bail!(
-            "no MAC in /get_device_info or /get_network_info; cannot key gateway device"
-        );
+        anyhow::bail!("no MAC in /get_device_info or /get_network_info; cannot key gateway device");
     }
     let hc_id = format!("{prefix}_gw_{}", normalize_mac(&mac));
 

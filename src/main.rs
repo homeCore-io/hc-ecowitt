@@ -136,7 +136,11 @@ async fn try_start(
         .ecowitt
         .gateway_ip
         .clone()
-        .or_else(|| std::fs::read_to_string(&cache_path).ok().map(|s| s.trim().to_string()))
+        .or_else(|| {
+            std::fs::read_to_string(&cache_path)
+                .ok()
+                .map(|s| s.trim().to_string())
+        })
         .filter(|s| !s.is_empty());
     let gateway_ip: std::sync::Arc<std::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(initial_cache));
@@ -178,7 +182,15 @@ async fn try_start(
                     .build()
                     .ok()?;
                 rt.block_on(async move {
-                    run_action(&action, &cmd_owned, gateway, &manual, &cache_path, &password).await
+                    run_action(
+                        &action,
+                        &cmd_owned,
+                        gateway,
+                        &manual,
+                        &cache_path,
+                        &password,
+                    )
+                    .await
                 })
             })
             .join()
@@ -697,10 +709,7 @@ async fn run_action(
                         combined.insert(format!("page_{page}"), v);
                     }
                     Err(e) => {
-                        combined.insert(
-                            format!("page_{page}"),
-                            json!({ "error": e.to_string() }),
-                        );
+                        combined.insert(format!("page_{page}"), json!({ "error": e.to_string() }));
                     }
                 }
             }
@@ -714,9 +723,7 @@ async fn run_action(
         "get_network" => simple_get(&ip, "/get_network_info?", "network").await,
         "get_units" => simple_get(&ip, "/get_units_info?", "units").await,
         "get_calibration" => simple_get(&ip, "/get_calibration?", "calibration").await,
-        "refresh_iot_devices" => {
-            simple_get(&ip, "/get_iotdevice_list?", "iot_devices").await
-        }
+        "refresh_iot_devices" => simple_get(&ip, "/get_iotdevice_list?", "iot_devices").await,
         "get_custom_server" => match fetch_custom_server(&ip, gateway_password).await {
             Ok((dialect, normalized, raw)) => Some(json!({
                 "status": "ok",
@@ -817,10 +824,9 @@ async fn resolve_gateway_ip(
         manual_attempts.push(host.clone());
     }
 
-    let found =
-        udp_discovery::discover_gateways(std::time::Duration::from_secs(3))
-            .await
-            .map_err(|e| format!("UDP discovery fallback failed: {e}"))?;
+    let found = udp_discovery::discover_gateways(std::time::Duration::from_secs(3))
+        .await
+        .map_err(|e| format!("UDP discovery fallback failed: {e}"))?;
     if let Some(ip) = found
         .first()
         .and_then(|v| v.get("ip").and_then(|s| s.as_str()).map(str::to_string))
@@ -869,7 +875,12 @@ async fn resolve_gateway_for_poller(
     manual_hosts: &[String],
     cache_path: &std::path::Path,
 ) -> Option<String> {
-    if let Some(ip) = cache.lock().ok().and_then(|g| g.clone()).filter(|s| !s.is_empty()) {
+    if let Some(ip) = cache
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .filter(|s| !s.is_empty())
+    {
         return Some(ip);
     }
     if let Some(ip) = configured.filter(|s| !s.is_empty()) {
@@ -918,11 +929,7 @@ fn cached_gateway_ip_path(config_path: &str) -> std::path::PathBuf {
 
 /// Common shape: GET a cgi-bin endpoint, parse JSON, wrap in a
 /// `{ status, host, <field>: ... }` envelope.
-async fn simple_get(
-    ip: &str,
-    path: &str,
-    response_field: &str,
-) -> Option<serde_json::Value> {
+async fn simple_get(ip: &str, path: &str, response_field: &str) -> Option<serde_json::Value> {
     use serde_json::json;
     let url = format!("http://{ip}{path}");
     match http_get_json(&url).await {
@@ -980,12 +987,8 @@ async fn set_custom_server_streaming(
         Ok(ip) => ip,
         Err(msg) => return ctx.error(msg).await,
     };
-    ctx.progress(
-        Some(25),
-        Some("resolved"),
-        Some(&format!("Gateway: {ip}")),
-    )
-    .await?;
+    ctx.progress(Some(25), Some("resolved"), Some(&format!("Gateway: {ip}")))
+        .await?;
 
     // Resolve `server` (auto-detect when blank) and `port` (default
     // to listen_port). Same logic as the prior sync version, just
@@ -1117,9 +1120,7 @@ async fn set_custom_server_streaming(
     {
         Ok(pair) => pair,
         Err(e) => {
-            return ctx
-                .error(format!("set customserver failed: {e}"))
-                .await;
+            return ctx.error(format!("set customserver failed: {e}")).await;
         }
     };
 
@@ -1194,10 +1195,7 @@ fn urlencoding(s: &str) -> String {
         .collect()
 }
 
-async fn http_post_form(
-    url: &str,
-    form: &[(&str, String)],
-) -> anyhow::Result<String> {
+async fn http_post_form(url: &str, form: &[(&str, String)]) -> anyhow::Result<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()?;
@@ -1260,8 +1258,7 @@ async fn http_post_json(url: &str, body: &serde_json::Value) -> anyhow::Result<S
 /// flow which sends `{"pwd":"<base64(password)>"}`. Empty input
 /// yields empty output, matching the JS `baseCode("")` behavior.
 fn base64_encode(input: &[u8]) -> String {
-    const CHARS: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 3 <= input.len() {
@@ -1309,7 +1306,11 @@ async fn gw_login(ip: &str, password: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("login response not JSON: {e}; body={raw}"))?;
     let status = parsed
         .get("status")
-        .and_then(|v| v.as_str().map(str::to_string).or_else(|| v.as_u64().map(|n| n.to_string())))
+        .and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v.as_u64().map(|n| n.to_string()))
+        })
         .unwrap_or_default();
     if status == "1" {
         Ok(())
@@ -1381,16 +1382,28 @@ fn normalize_ws_settings(raw: &serde_json::Value) -> serde_json::Value {
     let (server, path, port, interval) = if proto.eq_ignore_ascii_case("wunderground") {
         (
             raw.get("usr_wu_id").and_then(|v| v.as_str()).unwrap_or(""),
-            raw.get("usr_wu_path").and_then(|v| v.as_str()).unwrap_or(""),
-            raw.get("usr_wu_port").and_then(|v| v.as_str()).unwrap_or(""),
-            raw.get("usr_wu_upload").and_then(|v| v.as_str()).unwrap_or(""),
+            raw.get("usr_wu_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            raw.get("usr_wu_port")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            raw.get("usr_wu_upload")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         )
     } else {
         (
             raw.get("ecowitt_ip").and_then(|v| v.as_str()).unwrap_or(""),
-            raw.get("ecowitt_path").and_then(|v| v.as_str()).unwrap_or(""),
-            raw.get("ecowitt_port").and_then(|v| v.as_str()).unwrap_or(""),
-            raw.get("ecowitt_upload").and_then(|v| v.as_str()).unwrap_or(""),
+            raw.get("ecowitt_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            raw.get("ecowitt_port")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            raw.get("ecowitt_upload")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         )
     };
     json!({
@@ -1468,11 +1481,11 @@ async fn push_custom_server(
                         .collect::<Vec<_>>()
                         .join("&");
                     let get_url = format!("{url}{qs}");
-                    let body = http_get_text(&get_url)
-                        .await
-                        .map_err(|e2| anyhow::anyhow!(
+                    let body = http_get_text(&get_url).await.map_err(|e2| {
+                        anyhow::anyhow!(
                             "/set_customserver POST failed ({e}); GET fallback failed ({e2})"
-                        ))?;
+                        )
+                    })?;
                     Ok((get_url, body))
                 }
             }
