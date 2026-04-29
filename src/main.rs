@@ -1,3 +1,4 @@
+mod battery;
 mod config;
 mod form_parser;
 mod gateway_device;

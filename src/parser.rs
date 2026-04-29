@@ -3,6 +3,7 @@
 //! Each top-level key in the response (common_list, rain, co2, ch_temp, etc.)
 //! produces one or more (device_id, device_type, state_json) entries.
 
+use crate::battery::{self, BatteryKind};
 use crate::id_map::{common_id_to_attr, parse_value};
 use serde_json::{json, Value};
 
@@ -121,7 +122,11 @@ fn parse_common_list(items: &[Value], prefix: &str) -> Option<DeviceUpdate> {
         if let Some(batt) = item.get("battery").and_then(|v| v.as_str()) {
             if !has_battery {
                 let (b, _) = parse_value(batt);
-                state.insert("battery".to_string(), json!(b));
+                // Outdoor weather block can be reporting from WH65 (binary),
+                // WH68 (AA voltage), or WS80/WS85/WS90 (supercap voltage) —
+                // the cloud API doesn't tell us which sensor. Skip
+                // classification rather than guess.
+                battery::classify(&mut state, b, None);
                 has_battery = true;
             }
         }
@@ -204,7 +209,10 @@ fn parse_rain_array(items: &[Value], prefix: &str, suffix: &str) -> Option<Devic
 
         if let Some(batt) = item.get("battery").and_then(|v| v.as_str()) {
             let (b, _) = parse_value(batt);
-            state.insert("battery".into(), json!(b));
+            // Rain block can be WH40 (AA voltage) or rolled up from WS90
+            // (supercap voltage) or WH65 (binary) — same ambiguity as
+            // common_list. Skip classification.
+            battery::classify(&mut state, b, None);
         }
     }
 
@@ -247,7 +255,7 @@ fn parse_lightning(item: &Value, prefix: &str) -> DeviceUpdate {
     }
     if let Some(b) = item.get("battery").and_then(|v| v.as_str()) {
         let (v, _) = parse_value(b);
-        state.insert("battery".into(), json!(v));
+        battery::classify(&mut state, v, Some(BatteryKind::Level { max: 5 }));
     }
 
     DeviceUpdate {
@@ -279,12 +287,16 @@ fn parse_co2(item: &Value, prefix: &str) -> DeviceUpdate {
         ("PM4", "pm4"),
         ("CO2", "co2"),
         ("CO2_24H", "co2_24h"),
-        ("battery", "battery"),
     ] {
         if let Some(v) = item.get(*key).and_then(|v| v.as_str()) {
             let (num, _) = parse_value(v);
             state.insert(attr.to_string(), json!(num));
         }
+    }
+    // WH45/CO2 battery is a 0..=6 level, NOT a percentage.
+    if let Some(b) = item.get("battery").and_then(|v| v.as_str()) {
+        let (v, _) = parse_value(b);
+        battery::classify(&mut state, v, Some(BatteryKind::Level { max: 6 }));
     }
     if let Some(u) = item.get("unit").and_then(|v| v.as_str()) {
         state.insert("temperature_unit".into(), json!(u));
@@ -347,7 +359,7 @@ fn parse_multi_channel(
         }
         if let Some(b) = item.get("battery").and_then(|v| v.as_str()) {
             let (v, _) = parse_value(b);
-            state.insert("battery".into(), json!(v));
+            battery::classify(&mut state, v, multi_channel_battery_kind(slug));
         }
 
         let display_name = if name.is_empty() {
@@ -376,5 +388,25 @@ fn slug_to_label(slug: &str) -> &str {
         "lds" => "Level Sensor",
         "ec" => "EC Sensor",
         _ => slug,
+    }
+}
+
+/// Map a multi-channel sensor slug to the battery kind it reports.
+///
+/// Cloud-API path: each channel block has a generic `battery` field and
+/// the surrounding key (e.g. `ch_soil`) tells us which sensor model is
+/// reporting. See `battery::BatteryKind` docs for the per-family rules.
+fn multi_channel_battery_kind(slug: &str) -> Option<BatteryKind> {
+    match slug {
+        // WH31 multi-channel T/H — binary 0/1
+        "aisle" => Some(BatteryKind::Binary),
+        // WN34 soil temp / WH51 soil moisture / WN35 leaf wetness / LDS / EC
+        // — all single-AA powered, voltage with ~1.2V threshold
+        "temp" | "soil" | "leaf" | "lds" | "ec" => {
+            Some(BatteryKind::Voltage { low_threshold: 1.2 })
+        }
+        // PM2.5 channels 1-4 + leak detectors — discrete level 0..=5
+        "pm25" | "leak" => Some(BatteryKind::Level { max: 5 }),
+        _ => None,
     }
 }

@@ -8,6 +8,7 @@ use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use tracing::debug;
 
+use crate::battery;
 use crate::parser::DeviceUpdate;
 
 /// Fields that are metadata / not sensor data — don't warn about them.
@@ -141,10 +142,10 @@ fn parse_outdoor(
         return None;
     }
 
-    // Outdoor battery (wh65batt, wh68batt, wh80batt, wh90batt, ws90batt)
+    // Outdoor battery (wh65batt, wh68batt, wh80batt, wh90batt, ws90batt).
+    // Each has different semantics — battery::insert classifies per key.
     for key in ["wh65batt", "wh68batt", "wh80batt", "wh90batt", "ws90batt"] {
-        if let Some(v) = fields.get(key).and_then(|s| s.parse::<f64>().ok()) {
-            state.insert("battery".into(), json!(v));
+        if battery::insert(&mut state, fields, key) {
             consumed.insert(key.into());
             break;
         }
@@ -189,10 +190,9 @@ fn parse_indoor(
         return None;
     }
 
-    // Indoor sensor battery (wh25batt, wh26batt)
+    // Indoor sensor battery (wh25batt = binary, wh26batt = binary).
     for key in ["wh25batt", "wh26batt"] {
-        if let Some(v) = fields.get(key).and_then(|s| s.parse::<f64>().ok()) {
-            state.insert("battery".into(), json!(v));
+        if battery::insert(&mut state, fields, key) {
             consumed.insert(key.into());
             break;
         }
@@ -256,10 +256,10 @@ fn parse_rain(
         return None;
     }
 
-    // Rain gauge battery
+    // Rain gauge battery (wh40batt = voltage AA-class, wh90batt = voltage
+    // supercap if WS90 doubles as the rain source on this station).
     for key in ["wh40batt", "wh90batt"] {
-        if let Some(v) = fields.get(key).and_then(|s| s.parse::<f64>().ok()) {
-            state.insert("battery".into(), json!(v));
+        if battery::insert(&mut state, fields, key) {
             consumed.insert(key.into());
             break;
         }
@@ -299,7 +299,7 @@ fn parse_numbered_temp(
         if insert_f64_dyn(&mut state, fields, &humi_key, "humidity") {
             consumed.insert(humi_key.clone());
         }
-        if insert_f64_dyn(&mut state, fields, &batt_key, "battery") {
+        if battery::insert(&mut state, fields, &batt_key) {
             consumed.insert(batt_key.clone());
         }
 
@@ -344,7 +344,7 @@ fn parse_soil_moisture(
         if insert_f64_dyn(&mut state, fields, &ad_key, "moisture_ad") {
             consumed.insert(ad_key.clone());
         }
-        if insert_f64_dyn(&mut state, fields, &batt_key, "battery") {
+        if battery::insert(&mut state, fields, &batt_key) {
             consumed.insert(batt_key.clone());
         }
 
@@ -418,7 +418,7 @@ fn parse_leaf_wetness(
         if insert_f64_dyn(&mut state, fields, &key, "wetness") {
             consumed.insert(key.clone());
         }
-        if insert_f64_dyn(&mut state, fields, &batt_key, "battery") {
+        if battery::insert(&mut state, fields, &batt_key) {
             consumed.insert(batt_key.clone());
         }
 
@@ -454,7 +454,7 @@ fn parse_leak(
             consumed.insert(key.clone());
         }
         if !state.is_empty() {
-            if insert_f64_dyn(&mut state, fields, &batt_key, "battery") {
+            if battery::insert(&mut state, fields, &batt_key) {
                 consumed.insert(batt_key.clone());
             }
 
@@ -490,7 +490,7 @@ fn parse_pm25(
         if insert_f64_dyn(&mut state, fields, &avg_key, "pm25_24h") {
             consumed.insert(avg_key.clone());
         }
-        if insert_f64_dyn(&mut state, fields, &batt_key, "battery") {
+        if battery::insert(&mut state, fields, &batt_key) {
             consumed.insert(batt_key.clone());
         }
 
@@ -528,7 +528,7 @@ fn parse_lightning(
         state.insert("last_strike".into(), json!(v));
         consumed.insert("lightning_time".into());
     }
-    if insert_f64(&mut state, fields, "wh57batt", "battery") {
+    if battery::insert(&mut state, fields, "wh57batt") {
         consumed.insert("wh57batt".into());
     }
 
@@ -566,13 +566,17 @@ fn parse_co2(
         ("pm10_24h_co2", "pm10_24h"),
         ("tf_co2", "temperature"),
         ("humi_co2", "humidity"),
-        ("co2_batt", "battery"),
     ];
 
     for &(field, attr) in co2_fields {
         if insert_f64(&mut state, fields, field, attr) {
             consumed.insert(field.into());
         }
+    }
+
+    // co2_batt is a 0..=6 level, NOT a percentage. Classify via battery::insert.
+    if battery::insert(&mut state, fields, "co2_batt") {
+        consumed.insert("co2_batt".into());
     }
 
     if state.is_empty() {
