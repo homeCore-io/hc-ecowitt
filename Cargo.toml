@@ -1,5 +1,3 @@
-[workspace]
-
 [package]
 name        = "hc-ecowitt"
 version     = "0.1.0"
