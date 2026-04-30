@@ -29,7 +29,3 @@ axum         = "0.7"
 reqwest      = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Size-optimized release profile (matches homeCore-io/homeCore).
-[profile.release]
-strip         = "symbols"
-lto           = "thin"
-codegen-units = 1
