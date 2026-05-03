@@ -239,13 +239,33 @@ async fn try_start(
     // --- Create shared state with dynamic device registry ---
     let registry = DeviceRegistry::new(publisher, cfg.homecore.plugin_id.clone(), config_path);
 
+    // Parse allowed_source_ips into a typed set. Bad entries are
+    // logged and dropped — a typo shouldn't take the plugin down, but
+    // it should be visible. An empty set after parsing means "accept
+    // any" (same as the pre-allowlist default).
+    let mut allowed_source_ips: std::collections::HashSet<std::net::IpAddr> =
+        std::collections::HashSet::new();
+    for raw in &cfg.ecowitt.allowed_source_ips {
+        match raw.parse::<std::net::IpAddr>() {
+            Ok(addr) => {
+                allowed_source_ips.insert(addr);
+            }
+            Err(e) => {
+                warn!(value = %raw, error = %e, "ignoring invalid [ecowitt].allowed_source_ips entry");
+            }
+        }
+    }
+
     let shared = Arc::new(SharedState {
         registry: Mutex::new(registry),
         device_prefix: cfg.ecowitt.device_prefix.clone(),
+        allowed_source_ips,
     });
 
     info!(
+        bind_addr = %cfg.ecowitt.bind_addr,
         listen_port = cfg.ecowitt.listen_port,
+        allowed_source_ips = cfg.ecowitt.allowed_source_ips.len(),
         gateway_ip = ?cfg.ecowitt.gateway_ip,
         poll_interval = cfg.ecowitt.poll_interval_secs,
         "Ecowitt plugin started"
@@ -324,7 +344,7 @@ async fn try_start(
     }
 
     // --- Run HTTP POST receiver (blocks forever) ---
-    server::serve(cfg.ecowitt.listen_port, shared).await;
+    server::serve(&cfg.ecowitt.bind_addr, cfg.ecowitt.listen_port, shared).await;
 
     Ok(())
 }
