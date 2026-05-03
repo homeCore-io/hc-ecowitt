@@ -330,10 +330,10 @@ mod tests {
 
     #[test]
     fn insert_unknown_field_gets_raw_only() {
-        let f = fields("mystery_batt", "3.14");
+        let f = fields("mystery_batt", "2.95");
         let mut state = Map::new();
         assert!(insert(&mut state, &f, "mystery_batt"));
-        assert_eq!(state.get("battery"), Some(&json!(3.14)));
+        assert_eq!(state.get("battery"), Some(&json!(2.95)));
         assert!(state.get("battery_low").is_none());
         assert!(state.get("battery_kind").is_none());
     }
