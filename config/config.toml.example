@@ -23,6 +23,22 @@ password    = ""
 # Port for the HTTP server receiving POSTs from the Ecowitt gateway
 listen_port = 8888
 
+# Address the receiver binds to. Defaults to loopback so the listener
+# isn't reachable from the LAN — Ecowitt's "custom server" upload
+# protocol carries no real authentication (PASSKEY is the gateway's
+# MAC, sent in cleartext), so a `0.0.0.0` bind would let any LAN host
+# forge readings. Set to "0.0.0.0" (or a specific NIC IP) when the
+# gateway needs to POST directly across the network, and pair with
+# `allowed_source_ips` below.
+# bind_addr = "127.0.0.1"
+
+# Optional source-IP allowlist. Empty (default) accepts any source —
+# fine when `bind_addr` is loopback. When binding to a routable
+# address, list the gateway IP(s) here so packets from anything else
+# on the LAN are dropped with 403. Pair with a static DHCP lease for
+# the gateway so this entry doesn't go stale on the next renewal.
+# allowed_source_ips = ["10.0.10.50"]
+
 # Optional: gateway IP for polling mode (GET /get_livedata_info)
 # Uncomment to enable polling as a supplement or alternative to POST mode.
 # Also used as the default target for the manifest's cgi-bin actions

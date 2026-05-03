@@ -44,6 +44,24 @@ pub struct EcowittConfig {
     /// Port for the HTTP server that receives POSTs from the gateway.
     #[serde(default = "default_listen_port")]
     pub listen_port: u16,
+    /// Address the HTTP receiver binds to. Defaults to loopback so the
+    /// listener isn't reachable from the LAN by default — Ecowitt's
+    /// "custom server" upload protocol carries no real authentication
+    /// (PASSKEY is the gateway's MAC, sent in cleartext), so a 0.0.0.0
+    /// bind would let any LAN host forge readings. Operators who need
+    /// the gateway to POST directly across the network should set this
+    /// to "0.0.0.0" (or a specific NIC) and pair it with
+    /// `allowed_source_ips`.
+    #[serde(default = "default_bind_addr")]
+    pub bind_addr: String,
+    /// Optional list of source IPs allowed to POST to /data/report.
+    /// Empty (default) accepts any source — fine when `bind_addr` is
+    /// loopback. When binding to a routable address, populate this with
+    /// the gateway's IP to drop packets from anything else on the LAN.
+    /// Pair with a static DHCP lease for the gateway so the entry
+    /// doesn't go stale.
+    #[serde(default)]
+    pub allowed_source_ips: Vec<String>,
     /// Optional: gateway IP for polling mode.
     pub gateway_ip: Option<String>,
     /// Static console IPs to probe via HTTP whenever discovery runs
@@ -80,6 +98,9 @@ pub struct EcowittConfig {
 
 fn default_listen_port() -> u16 {
     8888
+}
+fn default_bind_addr() -> String {
+    "127.0.0.1".into()
 }
 fn default_poll_interval() -> u64 {
     60
