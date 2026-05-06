@@ -68,7 +68,7 @@ fn init_logging(
     config_path: &str,
 ) -> (
     tracing_appender::non_blocking::WorkerGuard,
-    hc_logging::LogLevelHandle,
+    plugin_sdk_rs::logging::LogLevelHandle,
     plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
 ) {
     #[derive(serde::Deserialize, Default)]
@@ -91,7 +91,7 @@ fn init_logging(
 async fn try_start(
     cfg: &Config,
     config_path: &str,
-    log_level_handle: hc_logging::LogLevelHandle,
+    log_level_handle: plugin_sdk_rs::logging::LogLevelHandle,
     mqtt_log_handle: plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
 ) -> Result<()> {
     // --- Plugin SDK connection ---
@@ -361,8 +361,8 @@ async fn try_start(
 /// `listen_port` is the homeCore-side port (`[ecowitt].listen_port`)
 /// the consoles POST to; baked into the `set_custom_server` action's
 /// `port` default so the form opens pre-populated.
-fn capabilities_manifest(listen_port: u16) -> hc_types::Capabilities {
-    use hc_types::{Action, Capabilities, Concurrency, RequiresRole};
+fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities {
+    use plugin_sdk_rs::types::{Action, Capabilities, Concurrency, RequiresRole};
     use serde_json::json;
 
     let host_param = json!({
