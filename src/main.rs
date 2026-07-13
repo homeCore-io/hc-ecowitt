@@ -260,6 +260,7 @@ async fn try_start(
         registry: Mutex::new(registry),
         device_prefix: cfg.ecowitt.device_prefix.clone(),
         allowed_source_ips,
+        last_report: Mutex::new(None),
     });
 
     info!(
@@ -270,6 +271,33 @@ async fn try_start(
         poll_interval = cfg.ecowitt.poll_interval_secs,
         "Ecowitt plugin started"
     );
+
+    // Loopback + no poller is a configuration that cannot receive data from a
+    // gateway anywhere else on the network — which is where gateways are. Say so
+    // at startup rather than letting it look healthy while the sensors go stale.
+    let bind_is_loopback = cfg
+        .ecowitt
+        .bind_addr
+        .parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(true);
+    if bind_is_loopback && cfg.ecowitt.gateway_ip.is_none() {
+        warn!(
+            bind_addr = %cfg.ecowitt.bind_addr,
+            "Receiver is bound to loopback and no polling gateway_ip is set, so this plugin can \
+             only accept POSTs originating on this host. An Ecowitt gateway is a separate device \
+             on the network and its uploads will be dropped with no error at either end. Set \
+             [ecowitt].bind_addr = \"0.0.0.0\" (and list the gateway in allowed_source_ips), or \
+             set gateway_ip to poll it instead."
+        );
+    }
+
+    // Watchdog: the listener being up says nothing about data actually arriving.
+    tokio::spawn(server::watch_for_silence(
+        Arc::clone(&shared),
+        cfg.ecowitt.bind_addr.clone(),
+        cfg.ecowitt.listen_port,
+    ));
 
     // --- Start optional poller ---
     if let Some(ref gateway_ip) = cfg.ecowitt.gateway_ip {

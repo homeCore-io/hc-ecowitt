@@ -55,5 +55,33 @@ value but omit `battery_low` and `battery_kind` rather than guess.
 ## Setup
 
 1. Copy `config/config.toml.example` to `config/config.toml`
-2. Configure the Ecowitt gateway's "Customized" upload: Protocol=Ecowitt, Server=this machine's IP, Path=/data/report/, Port=8888
-3. Add a `[[plugins]]` entry in `homecore.toml`
+
+2. **Let the gateway reach the receiver.** `bind_addr` defaults to `127.0.0.1`,
+   so out of the box the plugin only accepts POSTs originating on its own host.
+   A gateway is a separate box on your network, so unless you change this its
+   uploads are dropped by the kernel — the gateway reports no error, the plugin
+   sees no request, and the sensors simply never update. Nothing fails loudly.
+
+   ```toml
+   [ecowitt]
+   bind_addr = "0.0.0.0"
+   allowed_source_ips = ["10.0.0.42"]   # the gateway's IP
+   ```
+
+   The loopback default is not an accident: Ecowitt's upload protocol has no
+   real authentication (PASSKEY is just the gateway's MAC, in cleartext), so an
+   open `0.0.0.0` bind would let any host on the LAN forge weather readings.
+   `allowed_source_ips` is what buys that protection back — give the gateway a
+   static DHCP lease so the entry doesn't go stale.
+
+   Prefer no inbound listener at all? Set `gateway_ip` and the plugin will poll
+   the gateway instead, leaving `bind_addr` on loopback.
+
+3. Configure the Ecowitt gateway's "Customized" upload: Protocol=Ecowitt,
+   Server=this machine's IP, Path=/data/report/, Port=8888
+
+4. Add a `[[plugins]]` entry in `homecore.toml`
+
+If no data ever appears, check the plugin's log: it warns at startup when the
+receiver is bound to loopback with no poller configured, and again if no gateway
+report arrives within ten minutes.

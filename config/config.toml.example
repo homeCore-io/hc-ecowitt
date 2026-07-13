@@ -23,21 +23,33 @@ password    = ""
 # Port for the HTTP server receiving POSTs from the Ecowitt gateway
 listen_port = 8888
 
-# Address the receiver binds to. Defaults to loopback so the listener
-# isn't reachable from the LAN — Ecowitt's "custom server" upload
-# protocol carries no real authentication (PASSKEY is the gateway's
-# MAC, sent in cleartext), so a `0.0.0.0` bind would let any LAN host
-# forge readings. Set to "0.0.0.0" (or a specific NIC IP) when the
-# gateway needs to POST directly across the network, and pair with
-# `allowed_source_ips` below.
-# bind_addr = "127.0.0.1"
+# Address the receiver binds to.
+#
+# READ THIS BEFORE LEAVING IT AT THE DEFAULT. The default is loopback
+# (127.0.0.1), which accepts POSTs only from this host. Your gateway is
+# a separate box on the network, so with the default its uploads are
+# dropped by the kernel: the gateway reports no error, this plugin sees
+# no request, and your sensors silently never update. If you are using
+# POST mode — the normal setup — you almost certainly need to set both
+# of the lines below.
+#
+# The loopback default is deliberate, not an oversight: Ecowitt's
+# "custom server" upload protocol carries no real authentication
+# (PASSKEY is the gateway's MAC, sent in cleartext), so an open 0.0.0.0
+# bind would let any host on the LAN forge weather readings.
+# `allowed_source_ips` is what buys that protection back.
+#
+# bind_addr = "0.0.0.0"                    # or a specific NIC IP
+# allowed_source_ips = ["10.0.10.50"]      # your gateway's IP
 
-# Optional source-IP allowlist. Empty (default) accepts any source —
-# fine when `bind_addr` is loopback. When binding to a routable
-# address, list the gateway IP(s) here so packets from anything else
-# on the LAN are dropped with 403. Pair with a static DHCP lease for
-# the gateway so this entry doesn't go stale on the next renewal.
-# allowed_source_ips = ["10.0.10.50"]
+# Source-IP allowlist. Empty (default) accepts any source — fine while
+# `bind_addr` is loopback, and NOT fine once it isn't. When binding to a
+# routable address, list the gateway IP(s) here so packets from anything
+# else on the LAN are dropped with 403. Give the gateway a static DHCP
+# lease so this entry doesn't go stale on the next renewal.
+#
+# Prefer no inbound listener at all? Leave bind_addr on loopback and set
+# `gateway_ip` below — the plugin will poll the gateway instead.
 
 # Optional: gateway IP for polling mode (GET /get_livedata_info)
 # Uncomment to enable polling as a supplement or alternative to POST mode.
