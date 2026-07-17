@@ -1,7 +1,21 @@
 use anyhow::Result;
 use serde::Deserialize;
 
+/// Operator-config JSON Schema, published on the capability manifest so the
+/// hc-web editor renders a typed form. `None` without the `schema` feature.
+#[cfg(feature = "schema")]
+pub fn config_schema() -> Option<serde_json::Value> {
+    serde_json::to_value(schemars::schema_for!(Config)).ok()
+}
+
+#[cfg(not(feature = "schema"))]
+pub fn config_schema() -> Option<serde_json::Value> {
+    None
+}
+
+
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Config {
     pub homecore: HomecoreConfig,
     pub ecowitt: EcowittConfig,
@@ -18,6 +32,7 @@ impl Config {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HomecoreConfig {
     #[serde(default = "default_broker_host")]
     pub broker_host: String,
@@ -40,6 +55,7 @@ fn default_plugin_id() -> String {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct EcowittConfig {
     /// Port for the HTTP server that receives POSTs from the gateway.
     #[serde(default = "default_listen_port")]

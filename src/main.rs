@@ -222,6 +222,13 @@ async fn try_start(
         },
     ));
 
+    // Publish the operator-config JSON Schema so the hc-web editor renders a
+    // typed form (rides on the capability manifest).
+    let mgmt = match config::config_schema() {
+        Some(schema) => mgmt.with_config_schema(schema),
+        None => mgmt,
+    };
+
     // Publish active status.
     if let Err(e) = client.publish_plugin_status("active").await {
         error!(error = %e, "Failed to publish plugin status");
