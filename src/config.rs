@@ -18,9 +18,26 @@ pub fn config_schema() -> Option<serde_json::Value> {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Config {
     pub homecore: HomecoreConfig,
+    #[serde(default)]
     pub ecowitt: EcowittConfig,
     #[serde(default)]
     pub logging: crate::logging::LoggingConfig,
+}
+
+impl Default for EcowittConfig {
+    fn default() -> Self {
+        Self {
+            listen_port: default_listen_port(),
+            bind_addr: default_bind_addr(),
+            allowed_source_ips: Vec::new(),
+            gateway_ip: None,
+            manual_hosts: Vec::new(),
+            poll_interval_secs: default_poll_interval(),
+            device_prefix: default_device_prefix(),
+            gateway_username: default_gateway_username(),
+            gateway_password: String::new(),
+        }
+    }
 }
 
 impl Config {
