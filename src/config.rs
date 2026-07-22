@@ -13,6 +13,226 @@ pub fn config_schema() -> Option<serde_json::Value> {
     None
 }
 
+/// The plugin-authored config descriptor, published on the capability manifest.
+///
+/// The editor renders this *instead of* deriving a form from the JSON Schema,
+/// so it is authoritative: a key omitted here cannot be edited from the UI at
+/// all. `descriptor_covers_every_schema_field` below holds that line.
+pub fn config_descriptor() -> serde_json::Value {
+    use plugin_sdk_rs::config_descriptor::{Cond, Descriptor, Field, Section, Source};
+
+    Descriptor::new("plugin.ecowitt")
+        .title("Ecowitt")
+        .section(
+            Section::new("receiver", "Push receiver")
+                .help(
+                    "The usual setup: point the console's \"custom server\" upload \
+                     at this plugin and readings arrive as they are measured, with \
+                     no polling.",
+                )
+                .field(
+                    Field::host("ecowitt.bind_addr")
+                        .label("Bind address")
+                        .default("127.0.0.1")
+                        .help(
+                            "Loopback by default, on purpose. Ecowitt's upload \
+                             protocol has no real authentication — the PASSKEY is \
+                             just the gateway's MAC, sent in cleartext — so a \
+                             LAN-reachable listener would accept forged readings \
+                             from any host. Widen this only if the console must \
+                             POST across the network, and pair it with an allow-list.",
+                        ),
+                )
+                .field(
+                    Field::port("ecowitt.listen_port")
+                        .label("Listen port")
+                        .default(8888)
+                        .help("Must match the port set in the console's custom-server page."),
+                )
+                .field(
+                    Field::list("ecowitt.allowed_source_ips", "host")
+                        .label("Accept readings from")
+                        .default(Vec::<String>::new())
+                        .help(
+                            "Empty accepts any source, which is fine while the bind \
+                             address is loopback. Give the console a static DHCP \
+                             lease first, or this entry goes stale and readings \
+                             stop.",
+                        ),
+                )
+                .field(
+                    Field::note(
+                        "The listener is reachable from the LAN. Add the console's \
+                         IP above, or any host on the network can post fake weather.",
+                    )
+                    .visible_when(Cond::all([
+                        Cond::ne("ecowitt.bind_addr", "127.0.0.1"),
+                        Cond::not(Cond::truthy("ecowitt.allowed_source_ips")),
+                    ])),
+                ),
+        )
+        .section(
+            Section::new("polling", "Polling")
+                .help(
+                    "An alternative to the push receiver for consoles that cannot \
+                     reach this host, or that you would rather not open a port for. \
+                     Leave the address empty to stay push-only.",
+                )
+                .field(
+                    Field::host("ecowitt.gateway_ip")
+                        .label("Console address")
+                        .placeholder("Push only")
+                        .help("Set this and the plugin polls the console instead of waiting for uploads."),
+                )
+                .field(
+                    Field::duration("ecowitt.poll_interval_secs")
+                        .label("Poll every")
+                        .unit("secs")
+                        .default(60)
+                        .min(1)
+                        .visible_when(Cond::truthy("ecowitt.gateway_ip"))
+                        .help(
+                            "Ecowitt sensors report on their own cadence — typically \
+                             every 60s — so polling faster mostly re-reads the same \
+                             values.",
+                        ),
+                )
+                .field(
+                    Field::list("ecowitt.manual_hosts", "host")
+                        .label("Also probe these hosts")
+                        .default(Vec::<String>::new())
+                        .help(
+                            "Discovery finds consoles by UDP broadcast, which does \
+                             not cross VLANs. List a console here only to reach one \
+                             on another subnet that this host can still route to.",
+                        ),
+                ),
+        )
+        .section(
+            Section::new("gateway", "Console sign-in")
+                .help(
+                    "Only needed to *write* settings back to the console. Reading \
+                     measurements never requires this.",
+                )
+                .field(
+                    Field::text("ecowitt.gateway_username")
+                        .label("Username")
+                        .default("admin")
+                        .help(
+                            "Most Ecowitt firmware hard-codes `admin` and checks \
+                             only the password.",
+                        ),
+                )
+                .field(
+                    Field::secret("ecowitt.gateway_password")
+                        .label("Password")
+                        .help("Leave blank if the console's web UI has no password set."),
+                ),
+        )
+        .section(
+            Section::new("devices", "Devices")
+                .field(
+                    Field::text("ecowitt.device_prefix")
+                        .label("Device ID prefix")
+                        .default("ecowitt")
+                        .help(
+                            "Leads every device id this plugin creates \
+                             (`ecowitt_outdoor_temp`). Changing it renames every \
+                             device, which breaks rules that name the old ids — set \
+                             it once, at install.",
+                        ),
+                )
+                .field(
+                    Field::table("devices")
+                        .label("Sensors")
+                        .render("list")
+                        .key_by("device_id")
+                        .help(
+                            "Every sensor the console has reported. Give each one a \
+                             name that means something and put it in a room.",
+                        )
+                        .source(
+                            Source::core_resource("devices")
+                                .item_key("device_id")
+                                .labels("name", "device_id"),
+                        )
+                        .columns([
+                            Field::text("name").label("Name"),
+                            Field::select("area")
+                                .label("Room")
+                                .placeholder("Unassigned")
+                                .allow_create()
+                                .source(Source::core_resource("areas")),
+                        ]),
+                ),
+        )
+        .section(
+            Section::new("logging", "Logging")
+                .field(
+                    Field::text("logging.level")
+                        .label("Level")
+                        .default("info")
+                        .placeholder("info | debug | hc_ecowitt=debug"),
+                )
+                .field(
+                    Field::enumeration("logging.log_forward_level")
+                        .label("Forward to core")
+                        .render("segmented")
+                        .default("info")
+                        .help(
+                            "Minimum level forwarded to homeCore over MQTT; \
+                             anything below is written locally only.",
+                        )
+                        .option("off", "Off")
+                        .option("error", "Error")
+                        .option("warn", "Warn")
+                        .option("info", "Info")
+                        .option("debug", "Debug"),
+                )
+                .field(
+                    Field::enumeration("logging.rotation")
+                        .label("Rotate")
+                        .render("segmented")
+                        .default("daily")
+                        .option("hourly", "Hourly")
+                        .option("daily", "Daily")
+                        .option("weekly", "Weekly")
+                        .option("never", "Never"),
+                )
+                .field(
+                    Field::int("logging.max_size_mb")
+                        .label("Rotate at size")
+                        .unit("MB")
+                        .default(100)
+                        .min(0)
+                        .help(
+                            "Whichever comes first, this or the schedule. 0 disables \
+                             size-based rotation.",
+                        ),
+                )
+                .field(
+                    Field::int("logging.prune_after_days")
+                        .label("Prune after")
+                        .unit("days")
+                        .default(0)
+                        .min(0)
+                        .help("Delete rotated files older than this. 0 = never prune."),
+                )
+                .field(
+                    Field::toggle("logging.compress")
+                        .label("Compress rotated files")
+                        .default(true),
+                ),
+        )
+        .section(
+            Section::new("connection", "Connection")
+                .hidden()
+                .field(Field::host("homecore.broker_host").label("Broker host"))
+                .field(Field::port("homecore.broker_port").label("Broker port"))
+                .field(Field::secret("homecore.password").label("Broker password")),
+        )
+        .build()
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -143,4 +363,31 @@ fn default_device_prefix() -> String {
 }
 fn default_gateway_username() -> String {
     "admin".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The descriptor is authoritative — the editor renders it instead of
+    /// deriving a form from the schema — so anything it omits becomes
+    /// uneditable from the UI. That is a silent regression, not a compile
+    /// error, which is why this test exists rather than a code-review habit.
+    #[test]
+    #[cfg(feature = "schema")]
+    fn descriptor_covers_every_schema_field() {
+        let missing = plugin_sdk_rs::config_descriptor::missing_schema_coverage(
+            &config_schema().expect("schema feature is on"),
+            &config_descriptor(),
+            &[
+                // Bootstrap identity, fixed at install time. Editing it would
+                // rename the plugin out from under core's records.
+                "homecore.plugin_id",
+            ],
+        );
+        assert!(
+            missing.is_empty(),
+            "config fields missing from the descriptor: {missing:?}"
+        );
+    }
 }

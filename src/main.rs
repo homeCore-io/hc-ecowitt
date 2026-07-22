@@ -229,6 +229,10 @@ async fn try_start(
         None => mgmt,
     };
 
+    // …and the plugin-authored descriptor the editor renders instead of
+    // guessing a form from the schema. Rides the same manifest.
+    let mgmt = mgmt.with_config_descriptor(config::config_descriptor());
+
     // Publish active status.
     if let Err(e) = client.publish_plugin_status("active").await {
         error!(error = %e, "Failed to publish plugin status");
