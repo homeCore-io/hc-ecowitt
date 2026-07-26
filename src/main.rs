@@ -7,6 +7,7 @@ mod logging;
 mod parser;
 mod poller;
 mod registry;
+mod schema;
 mod server;
 mod udp_discovery;
 

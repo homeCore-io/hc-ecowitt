@@ -12,6 +12,13 @@ use crate::parser::DeviceUpdate;
 /// On first sight of a device_id, registers it automatically.
 pub struct DeviceRegistry {
     registered: HashSet<String>,
+    /// The attribute names last published in each device's schema.
+    ///
+    /// The schema is derived from what a device actually reports, and that set
+    /// grows as sensors are paired. Republishing on every reading would churn a
+    /// retained topic several times a minute for no change, so it is published
+    /// only when the set of names differs from last time.
+    published_attrs: std::collections::HashMap<String, Vec<String>>,
     publisher: DevicePublisher,
     #[allow(dead_code)]
     plugin_id: String,
@@ -27,6 +34,7 @@ impl DeviceRegistry {
 
         Self {
             registered: HashSet::new(),
+            published_attrs: std::collections::HashMap::new(),
             publisher,
             plugin_id,
             cache_path,
@@ -42,11 +50,32 @@ impl DeviceRegistry {
         }
 
         for update in updates {
+            self.publish_schema_if_changed(&update).await;
             let _ = self
                 .publisher
                 .publish_state(&update.device_id, &update.state)
                 .await;
         }
+    }
+
+    /// Publish this device's schema when the set of attributes it reports has
+    /// changed since last time — first sighting included.
+    async fn publish_schema_if_changed(&mut self, update: &DeviceUpdate) {
+        let Some(obj) = update.state.as_object() else {
+            return;
+        };
+        let mut names: Vec<String> = obj.keys().cloned().collect();
+        names.sort();
+        if self.published_attrs.get(&update.device_id) == Some(&names) {
+            return;
+        }
+        if let Err(e) =
+            crate::schema::publish(&self.publisher, &update.device_id, &update.state).await
+        {
+            warn!(device_id = %update.device_id, error = %e, "Failed to publish device schema");
+            return;
+        }
+        self.published_attrs.insert(update.device_id.clone(), names);
     }
 
     async fn register_device(&mut self, update: &DeviceUpdate) {
