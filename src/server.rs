@@ -188,8 +188,11 @@ pub async fn watch_for_silence(
                         ),
                     )
                     .with_remedy(
-                        "Set [ecowitt].bind_addr = \"0.0.0.0\" and list the gateway in \
-                         [ecowitt].allowed_source_ips.",
+                        "Set [ecowitt].gateway_ip to poll the gateway over outbound HTTP \
+                         instead — that works even in a container on a bridge network. To \
+                         keep receiving uploads, set [ecowitt].bind_addr = \"0.0.0.0\", list \
+                         the gateway in [ecowitt].allowed_source_ips, and ensure the listen \
+                         port is reachable from the gateway.",
                     ),
                 );
             }

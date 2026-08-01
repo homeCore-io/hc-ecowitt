@@ -337,7 +337,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -463,7 +463,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "hc-ecowitt"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -485,7 +485,7 @@ dependencies = [
 [[package]]
 name = "hc-logging"
 version = "0.1.4"
-source = "git+https://github.com/homeCore-io/homeCore?branch=main#7ed2f4ecd0804d920f7f29f062845bd05633a4d2"
+source = "git+https://github.com/homeCore-io/homeCore?branch=main#f5bd4f00b35ecdf1d51c77aa2c400c91c22b86df"
 dependencies = [
  "anyhow",
  "chrono",
@@ -503,7 +503,7 @@ dependencies = [
 [[package]]
 name = "hc-time"
 version = "0.1.4"
-source = "git+https://github.com/homeCore-io/homeCore?branch=main#7ed2f4ecd0804d920f7f29f062845bd05633a4d2"
+source = "git+https://github.com/homeCore-io/homeCore?branch=main#f5bd4f00b35ecdf1d51c77aa2c400c91c22b86df"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -513,7 +513,7 @@ dependencies = [
 [[package]]
 name = "hc-types"
 version = "0.1.5"
-source = "git+https://github.com/homeCore-io/homeCore?branch=main#7ed2f4ecd0804d920f7f29f062845bd05633a4d2"
+source = "git+https://github.com/homeCore-io/homeCore?branch=main#f5bd4f00b35ecdf1d51c77aa2c400c91c22b86df"
 dependencies = [
  "chrono",
  "ron",
@@ -1011,8 +1011,8 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "plugin-sdk-rs"
-version = "0.3.8"
-source = "git+https://github.com/homeCore-io/hc-plugin-sdk-rs?tag=v0.3.8#15cc36c19711e83b2f28fc1fea514af580ba1837"
+version = "0.3.9"
+source = "git+https://github.com/homeCore-io/hc-plugin-sdk-rs?tag=v0.3.9#d85845a822f32896c2f3b78dd6683927ed331ed7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1105,7 +1105,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

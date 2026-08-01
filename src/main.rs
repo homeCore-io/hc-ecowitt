@@ -321,9 +321,12 @@ async fn try_start(
                 ),
             )
             .with_remedy(
-                "Set [ecowitt].bind_addr = \"0.0.0.0\" and list the gateway in \
-                 [ecowitt].allowed_source_ips — or set [ecowitt].gateway_ip to poll the \
-                 gateway instead of receiving from it.",
+                "Set [ecowitt].gateway_ip to the gateway's address and it will be polled \
+                 over outbound HTTP — the option that also works when homeCore runs in a \
+                 container on a bridge network. To receive uploads instead, set \
+                 [ecowitt].bind_addr = \"0.0.0.0\", list the gateway in \
+                 [ecowitt].allowed_source_ips, and make sure the listen port is reachable \
+                 from the gateway (containers must publish it).",
             ),
         );
     }
@@ -761,8 +764,45 @@ async fn run_action(
         if let Some(ref ip) = selected {
             update_cache(&gateway_cache, cache_path, ip);
         }
+
+        // Say what happened in a sentence. Returning an empty array and
+        // nothing else left the UI stringifying the whole result map, which
+        // reads as a malfunction rather than an answer — and "found nothing"
+        // and "did not run" looked identical from the outside.
+        //
+        // The nothing-found case names the likeliest cause. UDP discovery is a
+        // broadcast to 255.255.255.255:45000, and a Docker bridge network does
+        // not forward broadcast — so on the standard compose stack this cannot
+        // succeed no matter how many gateways are on the LAN. That is the same
+        // limitation homeCore-io/docker documents for the mDNS/SSDP plugins,
+        // and it is invisible from in here: the send succeeds, nothing answers.
+        let message = if found.is_empty() {
+            if manual_hosts.is_empty() {
+                "No gateways answered the UDP broadcast, and no manual_hosts \
+                 are configured. If homeCore runs in a container on a bridge \
+                 network, broadcast cannot reach the LAN — use host networking, \
+                 or set [ecowitt].manual_hosts to the gateway's IP so it can be \
+                 probed directly."
+                    .to_string()
+            } else {
+                format!(
+                    "No gateways answered the UDP broadcast, and none of the {} \
+                     configured manual_hosts responded to an HTTP probe. Check \
+                     the addresses are reachable from this host.",
+                    manual_hosts.len()
+                )
+            }
+        } else {
+            format!(
+                "Found {} gateway{}.",
+                found.len(),
+                if found.len() == 1 { "" } else { "s" }
+            )
+        };
+
         return Some(json!({
             "status": "ok",
+            "message": message,
             "discovered": found,
             "count": found.len(),
             "selected": selected,
