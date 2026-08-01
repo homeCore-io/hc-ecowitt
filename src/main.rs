@@ -7,10 +7,12 @@ mod logging;
 mod parser;
 mod poller;
 mod registry;
+mod schema;
 mod server;
 mod udp_discovery;
 
 use anyhow::Result;
+use plugin_sdk_rs::types::PluginNotice;
 use plugin_sdk_rs::{PluginClient, PluginConfig};
 use std::sync::Arc;
 use std::time::Duration;
@@ -117,6 +119,9 @@ async fn try_start(
         &cfg.homecore.plugin_id,
         &cfg.logging.log_forward_level,
     );
+    // Conditions the operator needs to see on the plugin page, not only in
+    // the log. Taken before run() consumes the client.
+    let notices = client.notices();
     let publisher = client.device_publisher();
     // Cloneable handle for the gateway-device poller — needs to publish
     // alongside the sensor registry from a separate task.
@@ -222,6 +227,17 @@ async fn try_start(
         },
     ));
 
+    // Publish the operator-config JSON Schema so the hc-web editor renders a
+    // typed form (rides on the capability manifest).
+    let mgmt = match config::config_schema() {
+        Some(schema) => mgmt.with_config_schema(schema),
+        None => mgmt,
+    };
+
+    // …and the plugin-authored descriptor the editor renders instead of
+    // guessing a form from the schema. Rides the same manifest.
+    let mgmt = mgmt.with_config_descriptor(config::config_descriptor());
+
     // Publish active status.
     if let Err(e) = client.publish_plugin_status("active").await {
         error!(error = %e, "Failed to publish plugin status");
@@ -260,6 +276,7 @@ async fn try_start(
         registry: Mutex::new(registry),
         device_prefix: cfg.ecowitt.device_prefix.clone(),
         allowed_source_ips,
+        last_report: Mutex::new(None),
     });
 
     info!(
@@ -270,6 +287,57 @@ async fn try_start(
         poll_interval = cfg.ecowitt.poll_interval_secs,
         "Ecowitt plugin started"
     );
+
+    // Loopback + no poller is a configuration that cannot receive data from a
+    // gateway anywhere else on the network — which is where gateways are. Say so
+    // at startup rather than letting it look healthy while the sensors go stale.
+    let bind_is_loopback = cfg
+        .ecowitt
+        .bind_addr
+        .parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(true);
+    if bind_is_loopback && cfg.ecowitt.gateway_ip.is_none() {
+        warn!(
+            bind_addr = %cfg.ecowitt.bind_addr,
+            "Receiver is bound to loopback and no polling gateway_ip is set, so this plugin can \
+             only accept POSTs originating on this host. An Ecowitt gateway is a separate device \
+             on the network and its uploads will be dropped with no error at either end. Set \
+             [ecowitt].bind_addr = \"0.0.0.0\" (and list the gateway in allowed_source_ips), or \
+             set gateway_ip to poll it instead."
+        );
+        // The log line above is the same diagnosis, but it scrolls past at
+        // startup and the operator is looking at the plugin page — where,
+        // without this, the plugin reads "active" while receiving nothing.
+        // Config-derived, so it cannot resolve without a restart; raised once.
+        notices.raise(
+            PluginNotice::warning(
+                "receiver_unreachable",
+                format!(
+                    "The receiver is bound to {}, so it only accepts uploads originating on \
+                     this host. An Ecowitt gateway is a separate device on the network, and \
+                     its uploads are dropped with no error at either end.",
+                    cfg.ecowitt.bind_addr
+                ),
+            )
+            .with_remedy(
+                "Set [ecowitt].gateway_ip to the gateway's address and it will be polled \
+                 over outbound HTTP — the option that also works when homeCore runs in a \
+                 container on a bridge network. To receive uploads instead, set \
+                 [ecowitt].bind_addr = \"0.0.0.0\", list the gateway in \
+                 [ecowitt].allowed_source_ips, and make sure the listen port is reachable \
+                 from the gateway (containers must publish it).",
+            ),
+        );
+    }
+
+    // Watchdog: the listener being up says nothing about data actually arriving.
+    tokio::spawn(server::watch_for_silence(
+        Arc::clone(&shared),
+        cfg.ecowitt.bind_addr.clone(),
+        cfg.ecowitt.listen_port,
+        notices.clone(),
+    ));
 
     // --- Start optional poller ---
     if let Some(ref gateway_ip) = cfg.ecowitt.gateway_ip {
@@ -696,8 +764,45 @@ async fn run_action(
         if let Some(ref ip) = selected {
             update_cache(&gateway_cache, cache_path, ip);
         }
+
+        // Say what happened in a sentence. Returning an empty array and
+        // nothing else left the UI stringifying the whole result map, which
+        // reads as a malfunction rather than an answer — and "found nothing"
+        // and "did not run" looked identical from the outside.
+        //
+        // The nothing-found case names the likeliest cause. UDP discovery is a
+        // broadcast to 255.255.255.255:45000, and a Docker bridge network does
+        // not forward broadcast — so on the standard compose stack this cannot
+        // succeed no matter how many gateways are on the LAN. That is the same
+        // limitation homeCore-io/docker documents for the mDNS/SSDP plugins,
+        // and it is invisible from in here: the send succeeds, nothing answers.
+        let message = if found.is_empty() {
+            if manual_hosts.is_empty() {
+                "No gateways answered the UDP broadcast, and no manual_hosts \
+                 are configured. If homeCore runs in a container on a bridge \
+                 network, broadcast cannot reach the LAN — use host networking, \
+                 or set [ecowitt].manual_hosts to the gateway's IP so it can be \
+                 probed directly."
+                    .to_string()
+            } else {
+                format!(
+                    "No gateways answered the UDP broadcast, and none of the {} \
+                     configured manual_hosts responded to an HTTP probe. Check \
+                     the addresses are reachable from this host.",
+                    manual_hosts.len()
+                )
+            }
+        } else {
+            format!(
+                "Found {} gateway{}.",
+                found.len(),
+                if found.len() == 1 { "" } else { "s" }
+            )
+        };
+
         return Some(json!({
             "status": "ok",
+            "message": message,
             "discovered": found,
             "count": found.len(),
             "selected": selected,
