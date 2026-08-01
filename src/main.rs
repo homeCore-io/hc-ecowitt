@@ -12,6 +12,7 @@ mod server;
 mod udp_discovery;
 
 use anyhow::Result;
+use plugin_sdk_rs::types::PluginNotice;
 use plugin_sdk_rs::{PluginClient, PluginConfig};
 use std::sync::Arc;
 use std::time::Duration;
@@ -118,6 +119,9 @@ async fn try_start(
         &cfg.homecore.plugin_id,
         &cfg.logging.log_forward_level,
     );
+    // Conditions the operator needs to see on the plugin page, not only in
+    // the log. Taken before run() consumes the client.
+    let notices = client.notices();
     let publisher = client.device_publisher();
     // Cloneable handle for the gateway-device poller — needs to publish
     // alongside the sensor registry from a separate task.
@@ -302,6 +306,26 @@ async fn try_start(
              [ecowitt].bind_addr = \"0.0.0.0\" (and list the gateway in allowed_source_ips), or \
              set gateway_ip to poll it instead."
         );
+        // The log line above is the same diagnosis, but it scrolls past at
+        // startup and the operator is looking at the plugin page — where,
+        // without this, the plugin reads "active" while receiving nothing.
+        // Config-derived, so it cannot resolve without a restart; raised once.
+        notices.raise(
+            PluginNotice::warning(
+                "receiver_unreachable",
+                format!(
+                    "The receiver is bound to {}, so it only accepts uploads originating on \
+                     this host. An Ecowitt gateway is a separate device on the network, and \
+                     its uploads are dropped with no error at either end.",
+                    cfg.ecowitt.bind_addr
+                ),
+            )
+            .with_remedy(
+                "Set [ecowitt].bind_addr = \"0.0.0.0\" and list the gateway in \
+                 [ecowitt].allowed_source_ips — or set [ecowitt].gateway_ip to poll the \
+                 gateway instead of receiving from it.",
+            ),
+        );
     }
 
     // Watchdog: the listener being up says nothing about data actually arriving.
@@ -309,6 +333,7 @@ async fn try_start(
         Arc::clone(&shared),
         cfg.ecowitt.bind_addr.clone(),
         cfg.ecowitt.listen_port,
+        notices.clone(),
     ));
 
     // --- Start optional poller ---
