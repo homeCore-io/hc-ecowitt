@@ -54,7 +54,11 @@ value but omit `battery_low` and `battery_kind` rather than guess.
 
 ## Setup
 
-1. Copy `config/config.toml.example` to `config/config.toml`
+1. Install it from the web UI — **Plugins → Add** — and open its
+   **Configuration** tab. homeCore records the install itself, so there is no
+   `[[plugins]]` block to write; it owns the config file
+   (`config/plugins/plugin.ecowitt.toml`) and restarts the plugin when it
+   changes.
 
 2. **Let the gateway reach the receiver.** `bind_addr` defaults to `127.0.0.1`,
    so out of the box the plugin only accepts POSTs originating on its own host.
@@ -78,10 +82,29 @@ value but omit `battery_low` and `battery_kind` rather than guess.
    the gateway instead, leaving `bind_addr` on loopback.
 
 3. Configure the Ecowitt gateway's "Customized" upload: Protocol=Ecowitt,
-   Server=this machine's IP, Path=/data/report/, Port=8888
+   Server=this machine's IP, Path=/data/report/, Port=8888.
 
-4. Add a `[[plugins]]` entry in `homecore.toml`
+   Or skip it: run `set_custom_server` from the plugin's Actions and it pushes
+   its own listen URL into the gateway's settings for you.
 
-If no data ever appears, check the plugin's log: it warns at startup when the
-receiver is bound to loopback with no poller configured, and again if no gateway
-report arrives within ten minutes.
+### In a container
+
+A Docker **bridge** network defeats two of the three paths. Gateway discovery
+is a UDP broadcast to `255.255.255.255:45000`, which a bridge does not forward,
+and the upload port is inbound — `compose.yml` does not publish `8888`, so
+`bind_addr = "0.0.0.0"` alone is not enough there, though it would be on bare
+metal. Use host networking, or set `gateway_ip` and let the plugin poll over
+ordinary outbound HTTP.
+
+## Notices
+
+Problems are reported as **notices**, shown on the plugin's card in the web
+UI. They are state rather than log lines — each clears when the condition
+stops being true, so the card reflects the gateway's situation now rather than
+what it was at startup.
+
+| Code | Means |
+|---|---|
+| `receiver_unreachable` | Bound to loopback with no poller configured, so nothing can reach it — the silent failure above. |
+| `no_reports_received` | Listening, but no gateway has ever uploaded. |
+| `gateway_silent` | Reports were arriving and then stopped. |
