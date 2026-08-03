@@ -241,7 +241,7 @@ pub struct Config {
     #[serde(default)]
     pub ecowitt: EcowittConfig,
     #[serde(default)]
-    pub logging: crate::logging::LoggingConfig,
+    pub logging: plugin_sdk_rs::logging::LoggingConfig,
 }
 
 impl Default for EcowittConfig {
